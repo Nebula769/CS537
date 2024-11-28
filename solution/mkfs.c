@@ -111,14 +111,17 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  // round inode count to multiple of 32
+  inode_count = ((inode_count + 31) / 32) * 32;
+
   // Log parsed arguments (for debugging)
-  printf("RAID mode: %d\n", raid_mode);
-  printf("Disk count: %d\n", disk_count);
-  for (int i = 0; i < disk_count; i++) {
-    printf("Disk file: %s\n", disk_files[i]);
-  }
-  printf("Inode count: %d\n", inode_count);
-  printf("Block count: %d\n", block_count);
+  //   printf("RAID mode: %d\n", raid_mode);
+  //   printf("Disk count: %d\n", disk_count);
+  //   for (int i = 0; i < disk_count; i++) {
+  //     printf("Disk file: %s\n", disk_files[i]);
+  //   }
+  //   printf("Inode count: %d\n", inode_count);
+  //   printf("Block count: %d\n", block_count);
 
   // Example logic for setting up the filesystem (superblock, root inode, etc.)
   // Here you would proceed with creating the filesystem based on the input
@@ -161,6 +164,12 @@ int main(int argc, char *argv[]) {
         (((sb.d_bitmap_ptr + (block_count + 7) / 8) + 511) / BLOCK_SIZE) *
         BLOCK_SIZE;
     sb.d_blocks_ptr = sb.i_blocks_ptr + (inode_count * BLOCK_SIZE);
+    sb.raid_mode = raid_mode;
+
+    // printf("\ni_bitmap_ptr: %ld\n", sb.i_bitmap_ptr);
+    // printf("d_bitmap_ptr: %ld\n", sb.d_bitmap_ptr);
+    // printf("i_blocks_ptr: %ld\n", sb.i_blocks_ptr);
+    // printf("d_blocks_ptr: %ld\n", sb.d_blocks_ptr);
 
     // write superblock to disk
     memcpy(map, &sb, sizeof(sb));
@@ -180,15 +189,25 @@ int main(int argc, char *argv[]) {
     char block[BLOCK_SIZE];
     memset(block, 0, BLOCK_SIZE);
 
+     size_t required_data_size = sb.d_blocks_ptr + (block_count * BLOCK_SIZE);
+
+       if (required_data_size > filesize) {
+        printf("Error: Not enough space for data blocks. Disk size insufficient.\n");
+        return 255; // Return 0 as per test requirements
+    }
+
     // initialize inodes
 
     struct wfs_inode root_inode;
-    root_inode.num = 1;
+    root_inode.num = 0;
     root_inode.uid = getuid();
     root_inode.gid = getgid();
     root_inode.mode = S_IFDIR | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
     root_inode.nlinks = 1;
     root_inode.size = 0;
+
+    // bitmap rounding divide block size by something make a function for that
+    // for test case
 
     // time
     time_t current_time = time(NULL);

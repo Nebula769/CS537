@@ -33,7 +33,9 @@ struct wfs_sb {
   off_t d_bitmap_ptr;
   off_t i_blocks_ptr;
   off_t d_blocks_ptr;
+  int raid_mode; 
   // Extend after this line
+  
 };
 
 // Inode
