@@ -1,7 +1,5 @@
 # CS537 Fall 2024, Project 6
 
-## Updates
-
 ## Administrivia 
 
 - **Due Dates:**
@@ -111,7 +109,7 @@ We will create a simple filesystem similar to those you have seen in class such 
 ![filesystem layout on disk](disk-layout.svg)
 
 ### Inodes
-At this point, we would like to explicitly state that every inode always starts at the location divisible by 512. Do not pack inodes close to each other and "allocate" full 512B for each inode.
+At this point, we would like to explicitly state that every inode always starts at the location divisible by 512. Do not pack inodes close to each other and "allocate" full 512B for each inode. In other words, superblock and bitmaps are stored continuously in the beginning of the disk without any padding. Inodes and data blocks are always aligned to the block size (512B).
 
 ### Creating a file
 To create a file, allocate a new inode using the inode bitmap. Then add a new directory entry to the parent inode, the inode of the directory which holds the new file. New files, whether they are regular files or directories, are initially empty. 
@@ -133,11 +131,11 @@ You'll need to create the following C files for this project:
 
 ## Part 1 --- `mkfs.c` (15% of the grade)
 
-This C program initializes a file to an empty filesystem. The program receives three arguments: the raid mode, disk image file (multiple times), the number of inodes in the filesystem, and the number of data blocks in the system. The number of blocks should always be rounded up to the nearest multiple of 32 to prevent the data structures on disk from being misaligned. For example:
+This C program initializes a file to an empty filesystem. I.e. to the state, where the filesystem can be mounted and other files and directories can be created under the root inode. The program receives three arguments: the raid mode, disk image file (multiple times), the number of inodes in the filesystem, and the number of data blocks in the system. The number of blocks should always be rounded up to the nearest multiple of 32 to prevent the data structures on disk from being misaligned. For example:
   ```sh
   ./mkfs -r 1 -d disk1 -d disk2 -i 32 -b 200
   ```
-  initializes all disks (disk1 and disk2) to an empty filesystem with 32 inodes and 224 data blocks. The size of the inode and data bitmaps are determined by the number of blocks specified by `mkfs`. If `mkfs` finds that the disk image file is too small to accommodate the number of blocks, it should exit with return code 1. `mkfs` should write the superblock and root inode to the disk image.
+  initializes all disks (disk1 and disk2) to an empty filesystem with 32 inodes and 224 data blocks. The size of the inode and data bitmaps are determined by the number of blocks specified by `mkfs`. If `mkfs` finds that the disk image file is too small to accommodate the number of blocks, it should exit with return code -1. `mkfs` should write the superblock and root inode to the disk image.
 
 ## Part 2 --- `wfs.c` (85% of the grade)
 
@@ -212,7 +210,7 @@ You will need to extend the superblock (`struct wfs_sb`, you must add field(s) t
 
 ### Mounting Restrictions
 
-If the filesystem was created with $n$ drives, it has to be always mounted with $n$ drives. Otherwise you should report an error and exit with a non-zero exit code. The order of drives during mount in `wfs` command does not matter and the mount should always be succeed if correct drives are used.
+If the filesystem was created with $n$ drives, it has to be always mounted with $n$ drives. Otherwise you should report an error and exit with a non-zero exit code. The order of drives during mount in `wfs` command does not matter and the mount should always be succeed if correct drives are used. Note that filenames representing disks cannot be used as a filesystem identifier. Mount still has to work when disk images are renamed.
 
 Some examples:
 
