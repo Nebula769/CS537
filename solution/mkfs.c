@@ -7,10 +7,18 @@
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 #define MAX_DISKS 10
 
 int main(int argc, char *argv[]) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  unsigned int seed = (unsigned int)(tv.tv_sec * 1000000 + tv.tv_usec);
+  srand(seed);  
+
+  // Generate a random filesystem ID
+  int filesystem_id = rand();
   int raid_mode = -1;
   char *disk_files[MAX_DISKS];
   int disk_count = 0;
@@ -101,7 +109,6 @@ int main(int argc, char *argv[]) {
 
   // Round up block count to nearest multiple of 32
   block_count = ((block_count + 31) / 32) * 32;
-  printf("Updated Block Count: %d\n", block_count);
 
   // check if files exist
   for (int i = 0; i < disk_count; i++) {
@@ -165,6 +172,12 @@ int main(int argc, char *argv[]) {
         BLOCK_SIZE;
     sb.d_blocks_ptr = sb.i_blocks_ptr + (inode_count * BLOCK_SIZE);
     sb.raid_mode = raid_mode;
+    sb.disk_id = i;
+    printf("id = %d\n", sb.disk_id);
+    sb.filesystem_id = filesystem_id;
+    sb.num_disks = disk_count;
+
+
 
     // printf("\ni_bitmap_ptr: %ld\n", sb.i_bitmap_ptr);
     // printf("d_bitmap_ptr: %ld\n", sb.d_bitmap_ptr);
@@ -189,11 +202,12 @@ int main(int argc, char *argv[]) {
     char block[BLOCK_SIZE];
     memset(block, 0, BLOCK_SIZE);
 
-     size_t required_data_size = sb.d_blocks_ptr + (block_count * BLOCK_SIZE);
+    size_t required_data_size = sb.d_blocks_ptr + (block_count * BLOCK_SIZE);
 
-       if (required_data_size > filesize) {
-        printf("Error: Not enough space for data blocks. Disk size insufficient.\n");
-        return 255; // Return 0 as per test requirements
+    if (required_data_size > filesize) {
+      printf(
+          "Error: Not enough space for data blocks. Disk size insufficient.\n");
+      return 255; // Return 0 as per test requirements
     }
 
     // initialize inodes

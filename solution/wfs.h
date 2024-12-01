@@ -1,13 +1,13 @@
 #include <errno.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <sys/types.h>
+#include <time.h>
 
 #define BLOCK_SIZE (512)
 #define MAX_NAME (28)
 
-#define D_BLOCK (6) // direct data blocks inode can ref
-#define IND_BLOCK (D_BLOCK + 1) // index of indirect block in inode
+#define D_BLOCK (6)              // direct data blocks inode can ref
+#define IND_BLOCK (D_BLOCK + 1)  // index of indirect block in inode
 #define N_BLOCKS (IND_BLOCK + 1) // total number of block pointers in inode
 
 /*
@@ -20,7 +20,7 @@
 +----+---------+---------+--------+--------------------------+
 | SB | IBITMAP | DBITMAP | INODES |       DATA BLOCKS        |
 +----+---------+---------+--------+--------------------------+
-0    ^                   ^
+0         ^              ^
 i_bitmap_ptr        i_blocks_ptr
 
 */
@@ -33,8 +33,11 @@ struct wfs_sb {
   off_t d_bitmap_ptr;
   off_t i_blocks_ptr;
   off_t d_blocks_ptr;
-  int raid_mode; 
   // Extend after this line
+  int raid_mode;
+  int disk_id;
+  int filesystem_id;
+  int num_disks;
   
 };
 
