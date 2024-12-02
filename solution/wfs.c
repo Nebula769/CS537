@@ -17,11 +17,201 @@ struct wfs_sb *sb_array[MAX_DISKS];
 int num_disks = 0;
 int raid = -1;
 
+// helper functions
+int compare_disks(const void *a, const void *b) {
+  struct wfs_sb *sb_a = *(struct wfs_sb **)a;
+  struct wfs_sb *sb_b = *(struct wfs_sb **)b;
+  return sb_a->disk_id - sb_b->disk_id;
+}
+
+// count the filesystem id of the 2nd 3rd 4th be differnt
 int validate_mount_disks(struct wfs_sb *sb_array[], char *disk_files[],
-                         int disk_count, int expected_disks);
-int traverse_path(const char *path);
-int allocate_inode(mode_t mode);
-off_t allocate_data_block();
+                         int disk_count, int expected_disks) {
+
+  // If the filesystem was created with n drives, it has to be always mounted
+  // with n drives
+  if (disk_count != expected_disks) {
+    printf("Error: Incorrect number of disks. Expected %d, got %d.\n",
+           expected_disks, disk_count);
+    return -1;
+  }
+
+  // check if in same file system
+  int expected_filesystem_id = sb_array[0]->filesystem_id;
+  for (int i = 0; i < disk_count; i++) {
+    // printf("Disk %d: filesystem_id = %d\n", i, sb_array[i]->filesystem_id);
+    if (sb_array[i]->filesystem_id != expected_filesystem_id) {
+      printf(
+          "Error: Disk %d does not belong to the same filesystem as Disk 0.\n",
+          i);
+      return -1;
+    }
+  }
+
+  // Make sure that order or name change doesnt affect anything
+  qsort(sb_array, disk_count, sizeof(struct wfs_sb *), compare_disks);
+
+  // Validate disk_id sequence
+  for (int i = 0; i < disk_count; i++) {
+    // printf("Debug: Disk %d has disk_id %d (expected %d).\n", i,
+    //        sb_array[i]->disk_id, i);
+    if (sb_array[i]->disk_id != i) {
+      printf("Error: Disk %d has an unexpected disk_id %d (expected %d).\n", i,
+             sb_array[i]->disk_id, i);
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+int is_directory(mode_t mode) {
+  return (mode & S_IFMT) == S_IFDIR; // Check if it's a directory
+}
+
+int is_regular_file(mode_t mode) {
+  return (mode & S_IFMT) == S_IFREG; // Check if it's a regular file
+}
+
+/*
+ * Traverse the path from the root inode to the target inode
+ * Return the target inode if it exists, otherwise return -1
+ * only iterate up to D_BLOCK (direct pointers)
+ */
+int traverse_path(const char *path) {
+  // Traverse the path from the root inode to the target inode
+  // Return the target inode in the inode pointer
+  char *path_copy = malloc(strlen(path) + 1);
+  if (!path_copy) {
+    return -ENOMEM; // Return -ENOMEM on memory allocation error
+  }
+
+  strcpy(path_copy, path);
+  struct wfs_inode *root_inode =
+      (struct wfs_inode *)((char *)maps + sb_array[0]->i_blocks_ptr);
+
+  struct wfs_inode *current_inode = root_inode;
+
+  int inode = -1;
+  char *token = strtok(path_copy, "/");
+  while (token != NULL) {
+    // process token
+    int inode_num = -1;
+    off_t *blocks = current_inode->blocks;
+
+    // iterate through the blocks ptr array
+    for (int i = 0; i < D_BLOCK; i++) {
+      if (blocks[i] == 0) {
+        continue;
+      }
+
+      struct wfs_dentry *entries =
+          (struct wfs_dentry *)((char *)maps + blocks[i]);
+
+      // iterate through the directory entries
+      for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
+        if (strcmp(entries[j].name, token) == 0) {
+          int inode_num = entries[j].num;
+          inode = inode_num;
+          break;
+        }
+      }
+
+      if (inode_num != -1) {
+        break;
+      }
+    }
+
+    if (inode_num == -1) {
+      free(path_copy);
+      return -1;
+    }
+
+    // file/dir exists
+    current_inode = (struct wfs_inode *)((char *)maps +
+                                         inode_num * sizeof(struct wfs_inode));
+
+    token = strtok(NULL, "/");
+  }
+
+  free(path_copy);
+
+  return inode;
+}
+/*
+ * Allocate a new inode in the filesystem
+ * Return the inode number if successful, otherwise return -1
+ *
+ */
+int allocate_inode(mode_t mode) {
+  unsigned char *i_bitmap =
+      (unsigned char *)((char *)maps[0] + sb_array[0]->i_bitmap_ptr);
+  int num_bytes = sb_array[0]->num_inodes / 8;
+
+  for (int i = 0; i < num_bytes; i++) {
+    for (int bit_index = 0; bit_index < 8; bit_index++) {
+      if (!(i_bitmap[i] & (1 << bit_index))) {
+        // set inode as used
+        i_bitmap[i] |= (1 << bit_index);
+        // init new inode
+        int inode_num = i * 8 + bit_index;
+        struct wfs_inode *new_inode =
+            (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                                 inode_num * sizeof(struct wfs_inode));
+
+        memset(new_inode, 0, sizeof(struct wfs_inode));
+        new_inode->num = inode_num;
+        new_inode->mode = mode;
+        new_inode->uid = getuid();
+        new_inode->gid = getgid();
+        new_inode->size = 0;
+        new_inode->nlinks = 0;
+        time_t current_time = time(NULL);
+        new_inode->atim = current_time;
+        new_inode->mtim = current_time;
+        new_inode->ctim = current_time;
+
+        return inode_num;
+      }
+    }
+  }
+  return -1;
+}
+
+/*
+ * Allocate a new free data block in the filesystem
+ * Return the off_t of data block if successful, otherwise return -1
+ *
+ */
+off_t allocate_data_block() {
+  unsigned char *d_bitmap =
+      (unsigned char *)((char *)maps[0] + sb_array[0]->d_bitmap_ptr);
+  int num_bytes = sb_array[0]->num_data_blocks / 8;
+
+  for (int i = 0; i < num_bytes; i++) {
+    for (int bit_index = 0; bit_index < 8; bit_index++) {
+      if (!(d_bitmap[i] & (1 << bit_index))) {
+        // Mark the data block as used
+        d_bitmap[i] |= (1 << bit_index);
+        int block_num = i * 8 + bit_index;
+
+        int target_disk = block_num % num_disks;
+        // int block_offset = block_num / num_disks;
+
+        // Initialize the data block
+        char *block_ptr = (char *)maps[target_disk] +
+                          sb_array[0]->d_blocks_ptr + block_num * BLOCK_SIZE;
+
+        memset(block_ptr, 0, BLOCK_SIZE);
+        off_t offset = (off_t)((char *)block_ptr - (char *)maps[target_disk]);
+
+        return offset;
+      }
+    }
+  }
+
+  return -1; // No free data block available
+}
 
 int mount_disks(char *disk_files[], int disk_count) {
   int fd;
@@ -101,51 +291,7 @@ int mount_disks(char *disk_files[], int disk_count) {
   return 0;
 }
 
-int compare_disks(const void *a, const void *b) {
-  struct wfs_sb *sb_a = *(struct wfs_sb **)a;
-  struct wfs_sb *sb_b = *(struct wfs_sb **)b;
-  return sb_a->disk_id - sb_b->disk_id;
-}
-// cound the filesystem id of the 2nd 3rd 4th be differnt
-int validate_mount_disks(struct wfs_sb *sb_array[], char *disk_files[],
-                         int disk_count, int expected_disks) {
-
-  // If the filesystem was created with n drives, it has to be always mounted
-  // with n drives
-  if (disk_count != expected_disks) {
-    printf("Error: Incorrect number of disks. Expected %d, got %d.\n",
-           expected_disks, disk_count);
-    return -1;
-  }
-
-  // check if in same file system
-  int expected_filesystem_id = sb_array[0]->filesystem_id;
-  for (int i = 0; i < disk_count; i++) {
-    // printf("Disk %d: filesystem_id = %d\n", i, sb_array[i]->filesystem_id);
-    if (sb_array[i]->filesystem_id != expected_filesystem_id) {
-      printf(
-          "Error: Disk %d does not belong to the same filesystem as Disk 0.\n",
-          i);
-      return -1;
-    }
-  }
-
-  // Make sure that order or name change doesnt affect anything
-  qsort(sb_array, disk_count, sizeof(struct wfs_sb *), compare_disks);
-
-  // Validate disk_id sequence
-  for (int i = 0; i < disk_count; i++) {
-    // printf("Debug: Disk %d has disk_id %d (expected %d).\n", i,
-    //        sb_array[i]->disk_id, i);
-    if (sb_array[i]->disk_id != i) {
-      printf("Error: Disk %d has an unexpected disk_id %d (expected %d).\n", i,
-             sb_array[i]->disk_id, i);
-      return -1;
-    }
-  }
-
-  return 0;
-}
+// fuse functions
 
 static int wfs_mkdir(const char *path, mode_t mode) {
   if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
@@ -282,154 +428,11 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
   return 0; // Return 0 on success
 }
 
-// helper functions
-int is_directory(mode_t mode) {
-  return (mode & S_IFMT) == S_IFDIR; // Check if it's a directory
-}
-
-int is_regular_file(mode_t mode) {
-  return (mode & S_IFMT) == S_IFREG; // Check if it's a regular file
-}
-
-/*
- * Traverse the path from the root inode to the target inode
- * Return the target inode if it exists, otherwise return -1
- * only iterate up to D_BLOCK (direct pointers)
- */
-int traverse_path(const char *path) {
-  // Traverse the path from the root inode to the target inode
-  // Return the target inode in the inode pointer
-  char *path_copy = malloc(strlen(path) + 1);
-  if (!path_copy) {
-    return -ENOMEM; // Return -ENOMEM on memory allocation error
-  }
-
-  strcpy(path_copy, path);
-  struct wfs_sb *root_inode =
-      (struct wfs_inode *)((char *)maps + sb_array[0]->i_blocks_ptr);
-
-  struct wfs_inode *current_inode = root_inode;
-
-  int inode = -1;
-  char *token = strtok(path_copy, "/");
-  while (token != NULL) {
-    // process token
-    int inode_num = -1;
-    off_t *blocks = current_inode->blocks;
-
-    // iterate through the blocks ptr array
-    for (int i = 0; i < D_BLOCK; i++) {
-      if (blocks[i] == 0) {
-        continue;
-      }
-
-      struct wfs_dentry *entries =
-          (struct wfs_dentry *)((char *)maps + blocks[i]);
-
-      // iterate through the directory entries
-      for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
-        if (strcmp(entries[j].name, token) == 0) {
-          int inode_num = (struct wfs_inode *)((char *)maps + entries[j].num);
-          inode = inode_num;
-          break;
-        }
-      }
-
-      if (inode_num != -1) {
-        break;
-      }
-    }
-
-    if (inode_num == -1) {
-      free(path_copy);
-      return -1;
-    }
-
-    // file/dir exists
-    current_inode = (struct wfs_inode *)((char *)maps +
-                                         inode_num * sizeof(struct wfs_inode));
-
-    token = strtok(NULL, "/");
-  }
-
-  free(path_copy);
-
-  return inode;
-}
-/*
- * Allocate a new inode in the filesystem
- * Return the inode number if successful, otherwise return -1
- *
- */
-int allocate_inode(mode_t mode) {
-  unsigned char *i_bitmap =
-      (unsigned char *)((char *)maps[0] + sb_array[0]->i_bitmap_ptr);
-  int num_bytes = sb_array[0]->num_inodes / 8;
-
-  for (int i = 0; i < num_bytes; i++) {
-    for (int bit_index = 0; bit_index < 8; bit_index++) {
-      if (!(i_bitmap[i] & (1 << bit_index))) {
-        // set inode as used
-        i_bitmap[i] |= (1 << bit_index);
-        // init new inode
-        int inode_num = i * 8 + bit_index;
-        struct wfs_inode *new_inode =
-            (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
-                                 inode_num * sizeof(struct wfs_inode));
-
-        memset(new_inode, 0, sizeof(struct wfs_inode));
-        new_inode->num = inode_num;
-        new_inode->mode = mode;
-        new_inode->uid = getuid();
-        new_inode->gid = getgid();
-        new_inode->size = 0;
-        new_inode->nlinks = 0;
-        time_t current_time = time(NULL);
-        new_inode->atim = current_time;
-        new_inode->mtim = current_time;
-        new_inode->ctim = current_time;
-
-        return inode_num;
-      }
-    }
-  }
-  return -1;
-}
-
-/*
- * Allocate a new free data block in the filesystem
- * Return the off_t of data block if successful, otherwise return -1
- *
- */
-off_t allocate_data_block() {
-  unsigned char *d_bitmap =
-      (unsigned char *)((char *)maps[0] + sb_array[0]->d_bitmap_ptr);
-  int num_bytes = sb_array[0]->num_data_blocks / 8;
-
-  for (int i = 0; i < num_bytes; i++) {
-    for (int bit_index = 0; bit_index < 8; bit_index++) {
-      if (!(d_bitmap[i] & (1 << bit_index))) {
-        // Mark the data block as used
-        d_bitmap[i] |= (1 << bit_index);
-        int block_num = i * 8 + bit_index;
-
-        int target_disk = block_num % num_disks;
-        int block_offset = block_num / num_disks;
-
-        // Initialize the data block
-        char *block_ptr = (char *)maps[target_disk] +
-                          sb_array[0]->d_blocks_ptr + block_num * BLOCK_SIZE;
-
-        memset(block_ptr, 0, BLOCK_SIZE);
-        off_t offset = (off_t)((char *)block_ptr - (char *)maps[target_disk]);
-
-        return offset;
-      }
-    }
-  }
-
-  return -1; // No free data block available
-}
+// FUSE operations
+static struct fuse_operations ops = {
+    .getattr = wfs_getattr, .mkdir = wfs_mkdir,
+    // Add other functions (read, write, mkdir, etc.) here as needed
+};
 
 int main(int argc, char *argv[]) {
   // Initialize FUSE with specified operations
@@ -488,5 +491,5 @@ int main(int argc, char *argv[]) {
   fuse_args[fuse_argc] = NULL;          // Null-terminate for FUSE
   mount_disks(disks, num_disks);
 
-  // return fuse_main(argc, argv, &ops, NULL);
+  return fuse_main(argc, argv, &ops, NULL);
 }
