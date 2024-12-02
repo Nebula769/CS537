@@ -24,47 +24,6 @@ int compare_disks(const void *a, const void *b) {
   return sb_a->disk_id - sb_b->disk_id;
 }
 
-// count the filesystem id of the 2nd 3rd 4th be differnt
-int validate_mount_disks(struct wfs_sb *sb_array[], char *disk_files[],
-                         int disk_count, int expected_disks) {
-
-  // If the filesystem was created with n drives, it has to be always mounted
-  // with n drives
-  if (disk_count != expected_disks) {
-    printf("Error: Incorrect number of disks. Expected %d, got %d.\n",
-           expected_disks, disk_count);
-    return -1;
-  }
-
-  // check if in same file system
-  int expected_filesystem_id = sb_array[0]->filesystem_id;
-  for (int i = 0; i < disk_count; i++) {
-    // printf("Disk %d: filesystem_id = %d\n", i, sb_array[i]->filesystem_id);
-    if (sb_array[i]->filesystem_id != expected_filesystem_id) {
-      printf(
-          "Error: Disk %d does not belong to the same filesystem as Disk 0.\n",
-          i);
-      return -1;
-    }
-  }
-
-  // Make sure that order or name change doesnt affect anything
-  qsort(sb_array, disk_count, sizeof(struct wfs_sb *), compare_disks);
-
-  // Validate disk_id sequence
-  for (int i = 0; i < disk_count; i++) {
-    // printf("Debug: Disk %d has disk_id %d (expected %d).\n", i,
-    //        sb_array[i]->disk_id, i);
-    if (sb_array[i]->disk_id != i) {
-      printf("Error: Disk %d has an unexpected disk_id %d (expected %d).\n", i,
-             sb_array[i]->disk_id, i);
-      return -1;
-    }
-  }
-
-  return 0;
-}
-
 int is_directory(mode_t mode) {
   return (mode & S_IFMT) == S_IFDIR; // Check if it's a directory
 }
@@ -213,7 +172,48 @@ off_t allocate_data_block() {
   return -1; // No free data block available
 }
 
-int mount_disks(char *disk_files[], int disk_count) {
+// count the filesystem id of the 2nd 3rd 4th be differnt
+int validate_disks(struct wfs_sb *sb_array[], char *disk_files[],
+                   int disk_count, int expected_disks) {
+
+  // If the filesystem was created with n drives, it has to be always mounted
+  // with n drives
+  if (disk_count != expected_disks) {
+    printf("Error: Incorrect number of disks. Expected %d, got %d.\n",
+           expected_disks, disk_count);
+    return -1;
+  }
+
+  // check if in same file system
+  int expected_filesystem_id = sb_array[0]->filesystem_id;
+  for (int i = 0; i < disk_count; i++) {
+    // printf("Disk %d: filesystem_id = %d\n", i, sb_array[i]->filesystem_id);
+    if (sb_array[i]->filesystem_id != expected_filesystem_id) {
+      printf(
+          "Error: Disk %d does not belong to the same filesystem as Disk 0.\n",
+          i);
+      return -1;
+    }
+  }
+
+  // Make sure that order or name change doesnt affect anything
+  qsort(sb_array, disk_count, sizeof(struct wfs_sb *), compare_disks);
+
+  // Validate disk_id sequence
+  for (int i = 0; i < disk_count; i++) {
+    // printf("Debug: Disk %d has disk_id %d (expected %d).\n", i,
+    //        sb_array[i]->disk_id, i);
+    if (sb_array[i]->disk_id != i) {
+      printf("Error: Disk %d has an unexpected disk_id %d (expected %d).\n", i,
+             sb_array[i]->disk_id, i);
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+int init_disks(char *disk_files[], int disk_count) {
   int fd;
   for (int i = 0; i < disk_count; i++) {
     char *file_name = disk_files[i];
@@ -282,8 +282,7 @@ int mount_disks(char *disk_files[], int disk_count) {
   }
 
   int expected_disks = sb_array[0]->num_disks;
-  if (validate_mount_disks(sb_array, disk_files, disk_count, expected_disks) !=
-      0) {
+  if (validate_disks(sb_array, disk_files, disk_count, expected_disks) != 0) {
     printf("Disk validation failed. Aborting mount.\n");
     return -1;
   }
@@ -489,7 +488,7 @@ int main(int argc, char *argv[]) {
   // Pass FUSE options to fuse_main
   fuse_args[fuse_argc++] = mount_point; // Add mount point to FUSE args
   fuse_args[fuse_argc] = NULL;          // Null-terminate for FUSE
-  mount_disks(disks, num_disks);
+  init_disks(disks, num_disks);
 
   return fuse_main(argc, argv, &ops, NULL);
 }
