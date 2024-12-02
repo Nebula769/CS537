@@ -72,6 +72,23 @@ int mount_disks(char *disk_files[], int disk_count) {
     // printf("  Inode Blocks Pointer: %ld\n", sb_array[i]->i_blocks_ptr);
     // printf("  Data Blocks Pointer: %ld\n", sb_array[i]->d_blocks_ptr);
     // printf("  RAID Mode: %d\n", sb_array[i]->raid_mode);
+
+    // initialize root inode with . and ..
+    struct wfs_inode *root_inode =
+        (struct wfs_inode *)((char *)maps[i] + sb_array[i]->i_blocks_ptr);
+    off_t datablock = allocate_data_block();
+    if (datablock < 0) {
+      printf("Error: No space for root inode data block.\n");
+      return -ENOSPC;
+    }
+    root_inode->blocks[0] = datablock;
+    struct wfs_dentry *dentry =
+        (struct wfs_dentry *)((char *)maps[i] + sb_array[i]->d_blocks_ptr +
+                              datablock);
+    strcpy(dentry[0].name, ".");
+    dentry[0].num = 0;
+    strcpy(dentry[1].name, "..");
+    dentry[1].num = 0;
   }
 
   int expected_disks = sb_array[0]->num_disks;
