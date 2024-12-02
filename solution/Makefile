@@ -25,6 +25,7 @@ runWFS: wfs
 
 createDisks:
 	./create_disk.sh
+	clear
 
 run: createDisks runMKFS runWFS
 

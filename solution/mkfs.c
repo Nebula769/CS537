@@ -5,9 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/time.h>
 
 #define MAX_DISKS 10
 
@@ -15,7 +15,7 @@ int main(int argc, char *argv[]) {
   struct timeval tv;
   gettimeofday(&tv, NULL);
   unsigned int seed = (unsigned int)(tv.tv_sec * 1000000 + tv.tv_usec);
-  srand(seed);  
+  srand(seed);
 
   // Generate a random filesystem ID
   int filesystem_id = rand();
@@ -173,11 +173,8 @@ int main(int argc, char *argv[]) {
     sb.d_blocks_ptr = sb.i_blocks_ptr + (inode_count * BLOCK_SIZE);
     sb.raid_mode = raid_mode;
     sb.disk_id = i;
-    printf("id = %d\n", sb.disk_id);
     sb.filesystem_id = filesystem_id;
     sb.num_disks = disk_count;
-
-
 
     // printf("\ni_bitmap_ptr: %ld\n", sb.i_bitmap_ptr);
     // printf("d_bitmap_ptr: %ld\n", sb.d_bitmap_ptr);
@@ -217,7 +214,7 @@ int main(int argc, char *argv[]) {
     root_inode.uid = getuid();
     root_inode.gid = getgid();
     root_inode.mode = S_IFDIR | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
-    root_inode.nlinks = 1;
+    root_inode.nlinks = 2;
     root_inode.size = 0;
 
     // bitmap rounding divide block size by something make a function for that

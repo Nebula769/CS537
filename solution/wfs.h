@@ -38,7 +38,6 @@ struct wfs_sb {
   int disk_id;
   int filesystem_id;
   int num_disks;
-  
 };
 
 // Inode
@@ -55,6 +54,7 @@ struct wfs_inode {
   time_t ctim; /* Time of last status change */
 
   off_t blocks[N_BLOCKS];
+  char padding[392]; /* Padding to make the inode 512 bytes */
 };
 
 // Directory entry
