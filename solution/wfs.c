@@ -62,16 +62,19 @@ int traverse_path(const char *path) {
 
   struct wfs_inode *current_inode = root_inode;
 
-  int inode = -1;
+  int inode_num = -1;
   char *token = strtok(path_copy, "/");
   
   while (token != NULL) {
+    // reset inode_num 
+    inode_num = -1;
     if (strcmp(token, "") == 0) {
+      printf("token is empty string\n");
       token = strtok(NULL, "/");
     }
-    // printf("Processing token: %s\n", token);
+
+    printf("Processing token: %s\n", token);
     // process token
-    int inode_num = -1;
     off_t *blocks = current_inode->blocks;
 
     // printf("Iterating over blocks of current inode...\n");
@@ -80,19 +83,23 @@ int traverse_path(const char *path) {
       if (blocks[i] == 0) {
         continue;
       }
+      printf("checking block %i\n", i);
 
       struct wfs_dentry *entries =
-          (struct wfs_dentry *)((char *)maps[0] + blocks[i]);
+          (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr + blocks[i]);
       // printf("Checking block %d at address %p\n", i, (void *)entries);
       // printf("maps[0]: %p, blocks[%d]: %ld, calculated address: %p\n", (void *)maps[0], i, blocks[i], (void *)((char *)maps[0] + blocks[i]));
 
       // iterate through the directory entries
 
       for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
-        // printf("Comparing entry name: %s with token: %s\n", entries[j].name, token);
+        if (strcmp(entries[j].name, "") != 0) {
+          printf("nonempty dentry: %s with token: %s\n", entries[j].name, token);
+
+        }
+
         if (strcmp(entries[j].name, token) == 0) {
-          int inode_num = entries[j].num;
-          inode = inode_num;
+          inode_num = entries[j].num;
           break;
         }
       }
@@ -117,9 +124,9 @@ int traverse_path(const char *path) {
     token = strtok(NULL, "/");
   }
 
-  printf("Traverse: Found inode: %d for path: %s\n", inode, path);
+  printf("Traverse: Found inode: %d for path: %s\n", inode_num, path);
   free(path_copy);
-  return inode;
+  return inode_num;
 }
 /*
  * Allocate a new inode in the filesystem
@@ -179,7 +186,12 @@ off_t allocate_data_block() {
         int block_num = i * 8 + bit_index;
 
         int target_disk = block_num % num_disks;
+
+        // hard code to disk 0
+        target_disk = 0;
+
         // int block_offset = block_num / num_disks;
+        //printf("Allocating data block %d on disk %d\n", block_num, target_disk);
 
         // Initialize the data block
         char *block_ptr = (char *)maps[target_disk] +
@@ -223,15 +235,17 @@ int allocate_dentry(char *name, int parent_inode_num, int inode_num) {
       }
       inode->blocks[i] = datablock;
 
-      printf("Debug: Allocated data block at offset %ld for block index %d.\n", datablock, i);
+      
       struct wfs_dentry *dentry =
           (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr +
                                 datablock);
-      printf("Debug: Writing new dentry at address %p.\n", (void *)dentry);
       
       dentry[0].num = inode_num;
       strcpy(dentry[0].name, name);
-      printf("Debug: Dentry written. Name='%s', Inode=%d.\n", dentry[0].name, dentry[0].num);
+      printf("Allocated dentry with new block %d for inode %d in parent inode %d\n",
+             i, inode_num, parent_inode_num);
+                 
+     
       return 0;
 
     } else {
@@ -239,13 +253,14 @@ int allocate_dentry(char *name, int parent_inode_num, int inode_num) {
       struct wfs_dentry *dentry =
           (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr +
                                 inode->blocks[i]);
-       printf("Debug: Inspecting block %d at address %p.\n", i, (void *)dentry);
+     
       for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
-        if (dentry[j].num == 0) {
+        if (dentry[j].num == 0 && dentry[j].name[0] == 0){
           dentry[j].num = inode_num;
           strcpy(dentry[j].name, name);
-           printf("Debug: Free slot found. Dentry written at index %d. Name='%s', Inode=%d.\n",
-                 j, dentry[j].name, dentry[j].num);
+
+          printf("Allocated dentry: %s for inode %d in block %d at index %d in inode %d\n",
+                 dentry[j].name, inode_num, i, j, parent_inode_num);
           return 0;
         }
       }
@@ -348,22 +363,7 @@ int init_disks(char *disk_files[], int disk_count) {
     // printf("  Data Blocks Pointer: %ld\n", sb_array[i]->d_blocks_ptr);
     // printf("  RAID Mode: %d\n", sb_array[i]->raid_mode);
 
-    // initialize root inode with . and ..
-    struct wfs_inode *root_inode =
-        (struct wfs_inode *)((char *)maps[i] + sb_array[i]->i_blocks_ptr);
-    off_t datablock = allocate_data_block();
-    if (datablock < 0) {
-      printf("Error: No space for root inode data block.\n");
-      return -ENOSPC;
-    }
-    root_inode->blocks[0] = datablock;
-    struct wfs_dentry *dentry =
-        (struct wfs_dentry *)((char *)maps[i] + sb_array[i]->d_blocks_ptr +
-                              datablock);
-    strcpy(dentry[0].name, ".");
-    dentry[0].num = 0;
-    strcpy(dentry[1].name, "..");
-    dentry[1].num = 0;
+    
   }
 
   int expected_disks = sb_array[0]->num_disks;
@@ -451,6 +451,7 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
 }
 
 static int wfs_mkdir(const char *path, mode_t mode) {
+  mode_t d_mode = S_IFDIR | mode;
   printf("mkdir: %s\n", path);
   if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
     printf("Error in mkdir: Invalid path.\n");
@@ -469,7 +470,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
   
   // Find parent directory path and directory name
   char *last_slash = strrchr(path_copy, '/');
-  printf("last_slash: %s\n", last_slash);
+  
   if (!last_slash) {
     printf("Error in mkdir: Invalid path.\n");
     free(path_copy);
@@ -493,8 +494,8 @@ static int wfs_mkdir(const char *path, mode_t mode) {
     dir_name = ((char*)last_slash + 1);
   }
 
-  printf("parent_path: %s\n", parent_path);
-  printf("dir_name: %s\n", dir_name);
+  //printf("parent_path: %s\n", parent_path);
+  //printf("dir_name: %s\n", dir_name);
 
   if (strlen(dir_name) == 0) {
     printf("Error in mkdir: Invalid directory name len is 0.\n");
@@ -504,7 +505,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
 
 
   int parent_inode_num = traverse_path(parent_path);
-  printf("parent_inode_num: %d\n", parent_inode_num);
+  //printf("parent_inode_num: %d\n", parent_inode_num);
   if (parent_inode_num < 0) {
     printf("Error in mkdir: Parent directory does not exist.\n");
     free(path_copy);
@@ -517,7 +518,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
 
   // check if dir already exists
   int existing_inode_num = traverse_path(path);
-  printf("existing_inode_num: %d\n", existing_inode_num);
+  //printf("existing_inode_num: %d\n", existing_inode_num);
   if (existing_inode_num >= 0) {
     free(path_copy);
     printf("Directory already exists.\n");
@@ -525,8 +526,8 @@ static int wfs_mkdir(const char *path, mode_t mode) {
   }
 
   // allocate a new inode
-  int new_inode_num = allocate_inode(mode);
-  printf("new_inode_num: %d\n", new_inode_num);
+  int new_inode_num = allocate_inode(d_mode);
+  //printf("new_inode_num: %d\n", new_inode_num);
   if (new_inode_num < 0) {
     printf("Failed to allocate new inode.\n");
     free(path_copy);
@@ -536,7 +537,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
   struct wfs_inode *new_inode =
       (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
                            new_inode_num * sizeof(struct wfs_inode));
-  new_inode->nlinks = 2;
+  new_inode->nlinks = 0;
 
 
   if (allocate_dentry(dir_name, parent_inode_num, new_inode_num) < 0) 
@@ -548,6 +549,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
   // Update parent directory's metadata
   parent_inode->nlinks++;
   parent_inode->mtim = time(NULL);
+  parent_inode->size += 1;
 
   free(path_copy);
   return 0;
@@ -628,11 +630,17 @@ int main(int argc, char *argv[]) {
   for (int i = 0; i < num_disks; i++) {
     printf("  %s\n", disks[i]);
   }
+  printf("Starting Fuse... \n");
     
   // Pass FUSE options to fuse_main
   fuse_args[fuse_argc++] = mount_point; // Add mount point to FUSE args
   fuse_args[fuse_argc] = NULL;          // Null-terminate for FUSE
   init_disks(disks, num_disks);
+  struct wfs_inode *root_inode = (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr);
+  struct wfs_dentry *dentry = (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr + root_inode->blocks[0]);
+  printf("dentry name: %s\n", dentry[0].name);
+  printf("dentry num: %d\n", dentry[0].num);
+  printf("inode nlink: %d\n", root_inode->nlinks);
 
   return fuse_main(fuse_argc, fuse_args, &ops, NULL);
 }

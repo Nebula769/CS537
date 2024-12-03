@@ -50,3 +50,6 @@ runtestWFSInvalidID: create_test_disks mkfs wfs
 	./wfs disk1 disk3 $(FUSE_OPTIONS) mnt
 
 runtest: create_test_disks runtestWFSInvalidID
+
+
+run1: clean run
