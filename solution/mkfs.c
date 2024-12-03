@@ -210,6 +210,7 @@ int main(int argc, char *argv[]) {
     // initialize inodes
 
     struct wfs_inode root_inode;
+    memset(&root_inode, 0, sizeof(struct wfs_inode));
     root_inode.num = 0;
     root_inode.uid = getuid();
     root_inode.gid = getgid();
