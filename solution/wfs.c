@@ -17,6 +17,7 @@ struct wfs_sb *sb_array[MAX_DISKS];
 int num_disks = 0;
 int raid = -1;
 
+
 // helper functions
 int compare_disks(const void *a, const void *b) {
   struct wfs_sb *sb_a = *(struct wfs_sb **)a;
@@ -31,6 +32,7 @@ int is_directory(mode_t mode) {
 int is_regular_file(mode_t mode) {
   return (mode & S_IFMT) == S_IFREG; // Check if it's a regular file
 }
+
 
 /*
  * Traverse the path from the root inode to the target inode
@@ -172,6 +174,57 @@ off_t allocate_data_block() {
   return -1; // No free data block available
 }
 
+/*
+* Allocate a new directory entry in the inode
+* gos through data block looking for slots, otherwise allocate new data block
+* Returns 1 if successful, otherwise return -1
+*/
+int allocate_dentry(char *name, int inode_num) {
+  // Allocate a new directory entry in the inode
+  // Return the index of the new directory entry if successful, otherwise return
+  // -1
+  if (strlen(name) + 1 > MAX_NAME) {
+    return -1; // Return error if name length exceeds MAX_NAME
+  }
+  
+  struct wfs_inode *inode =
+      (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                           inode_num * sizeof(struct wfs_inode));
+  for (int i = 0; i < D_BLOCK; i++) {
+    if (inode->blocks[i] == 0 ) {
+      // allocate new data block and place dentry
+      off_t datablock = allocate_data_block();
+      if (datablock < 0) {
+        return -1; // No space for new data block
+      }
+      inode->blocks[i] = datablock;
+      struct wfs_dentry *dentry =
+          (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr +
+                                datablock);
+      dentry[0].num = inode_num;
+      strcpy(dentry[0].name, name);
+      return 0;
+
+    } else {
+      // iterate over for free slot for dentry, else go to next block
+      struct wfs_dentry *dentry =
+          (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr +
+                                inode->blocks[i]);
+      for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
+        if (dentry[j].num == 0) {
+          dentry[j].num = inode_num;
+          strcpy(dentry[j].name, name);
+          return 0;
+        }
+      }
+    }
+
+  }
+
+  printf("Error: No space for new directory entry.\n");
+  return -1;
+}
+
 // count the filesystem id of the 2nd 3rd 4th be differnt
 int validate_disks(struct wfs_sb *sb_array[], char *disk_files[],
                    int disk_count, int expected_disks) {
@@ -216,8 +269,8 @@ int validate_disks(struct wfs_sb *sb_array[], char *disk_files[],
 int init_disks(char *disk_files[], int disk_count) {
   int fd;
   for (int i = 0; i < disk_count; i++) {
-    char *file_name = disk_files[i];
-    fd = open(file_name, O_RDWR);
+    char *dir_name = disk_files[i];
+    fd = open(dir_name, O_RDWR);
     if (fd == -1) {
       perror("Error opening disk file");
       return -1;
@@ -253,8 +306,8 @@ int init_disks(char *disk_files[], int disk_count) {
     }
     num_disks++;
 
-    // printf("Set superblock for disk: %s\n", file_name);
-    // printf("Superblock details for disk %s:\n", file_name);
+    // printf("Set superblock for disk: %s\n", dir_name);
+    // printf("Superblock details for disk %s:\n", dir_name);
     // printf("  Number of Inodes: %zu\n", sb_array[i]->num_inodes);
     // printf("  Number of Data Blocks: %zu\n", sb_array[i]->num_data_blocks);
     // printf("  Inode Bitmap Pointer: %ld\n", sb_array[i]->i_bitmap_ptr);
@@ -292,7 +345,96 @@ int init_disks(char *disk_files[], int disk_count) {
 
 // fuse functions
 
+static int wfs_mknod(const char *path, mode_t mode, dev_t dev) 
+{
+  printf("mknod: %s\n", path);
+  
+   // Check if the path is valid and not empty
+    if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
+        return -ENOENT; // Invalid path
+    }
+
+    char *path_copy = malloc(strlen(path) + 1);
+    if (!path_copy) {
+        return -ENOSPC; // Memory allocation failed
+    }
+    strcpy(path_copy, path);
+
+    char *last_slash = strrchr(path_copy, '/');
+    if (!last_slash || last_slash == path_copy) {
+        free(path_copy);
+        return -ENOENT; // Parent directory does not exist
+    }
+
+    // Separate parent directory and file name
+    *last_slash = '\0'; // Null-terminate to get the parent directory path
+    char *parent_path = path_copy;  // Parent directory path
+    char *dir_name = last_slash + 1; // File name
+
+    // Ensure the file name is not empty
+    if (strlen(dir_name) == 0) {
+        free(path_copy);
+        return -ENOENT; // Invalid file name
+    }
+
+    // Traverse the file system to find the parent inode
+    int parent_inode_num = traverse_path(parent_path);
+    if (parent_inode_num < 0) {
+        free(path_copy);
+        return -ENOENT; // Parent directory does not exist
+    }
+
+     struct wfs_inode *parent_inode = (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr + parent_inode_num * sizeof(struct wfs_inode));
+
+     // Check if the file already exists
+    if (traverse_path(path) >= 0) {
+        free(path_copy);
+        return -EEXIST; // File already exists
+    }
+
+    int new_inode_num = allocate_inode(mode);
+    if (new_inode_num < 0) {
+        free(path_copy);
+        return -ENOSPC; // No space for new inode
+    }
+
+    // Get the new inode and initialize its metadata
+    struct wfs_inode *new_inode =
+        (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                             new_inode_num * sizeof(struct wfs_inode));
+
+    new_inode->nlinks = 1;
+    new_inode->size = 0;   
+    new_inode->blocks[0] = 0; 
+    time_t current_time = time(NULL);
+    new_inode->atim = current_time; 
+    new_inode->mtim = current_time; 
+    new_inode->ctim = current_time;
+
+    // Add directory entry to the parent directory
+    if (allocate_dentry(dir_name, parent_inode_num) < 0) {
+        free(path_copy);
+        return -ENOSPC; // No space in parent directory for the entry
+    }
+
+    // Update parent directory metadata
+    parent_inode->nlinks++;
+    parent_inode->mtim = current_time;
+
+    free(path_copy);
+    return 0; // Success
+
+    
+
+    
+
+    
+
+
+}
+
 static int wfs_mkdir(const char *path, mode_t mode) {
+  printf("mkdir: %s\n", path);
   if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
     return -ENOENT;
   }
@@ -350,50 +492,11 @@ static int wfs_mkdir(const char *path, mode_t mode) {
                            new_inode_num * sizeof(struct wfs_inode));
   new_inode->nlinks = 2;
 
-  // add the directory to the parent directory
-  int added = 0;
-  // iterate over the parent directory blocks
-  for (int i = 0; i < D_BLOCK; i++) {
-    if (parent_inode->blocks[i] == 0) {
-      int new_block_offset = allocate_data_block();
-      if (new_block_offset < 0) {
-        free(path_copy);
-        return -ENOSPC; // No space for new data block
-      }
-
-      // Assign the new data block to the parent directory
-      parent_inode->blocks[i] = new_block_offset;
+    if (allocate_dentry(dir_name, parent_inode_num) < 0) 
+    {
+      free(path_copy);
+      return -ENOSPC; // No space in parent directory for new entry
     }
-
-    // acess the block data
-    char *block_ptr =
-        (char *)maps[0] + sb_array[0]->d_blocks_ptr + parent_inode->blocks[i];
-    for (int j = 0; j < BLOCK_SIZE / (sizeof(int) + MAX_NAME); j++) {
-      int entry_offset = j * (sizeof(int) + MAX_NAME);
-      int entry_inode_num;
-      memcpy(&entry_inode_num, block_ptr + entry_offset, sizeof(int));
-
-      // find free directory entry
-      if (entry_inode_num == 0) {
-        // Add the new directory entry
-        memcpy(block_ptr + entry_offset, &new_inode_num, sizeof(int));
-        memcpy(block_ptr + entry_offset + sizeof(int), dir_name,
-               strlen(dir_name) + 1);
-        added = 1;
-        parent_inode->size += sizeof(int) + MAX_NAME;
-        break;
-      }
-    }
-
-    if (added) {
-      break;
-    }
-  }
-  if (!added) {
-    free(path_copy);
-    return -ENOSPC; // No space in parent directory
-  }
-
   // Update parent directory's metadata
   parent_inode->nlinks++;
   parent_inode->mtim = time(NULL);
@@ -406,6 +509,7 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
   // Implementation of getattr function to retrieve file attributes
   // Fill stbuf structure with the attributes of the file/directory indicated
   // by path parse pa
+  printf("getattr: %s\n", path);
   int inode_num = traverse_path(path);
   if (inode_num < 0) {
     return -ENOENT; // Return -ENOENT if the file does not exist
@@ -476,19 +580,11 @@ int main(int argc, char *argv[]) {
   for (int i = 0; i < num_disks; i++) {
     printf("  %s\n", disks[i]);
   }
-
-  // printf("FUSE options:\n");
-  for (int i = 0; i < fuse_argc; i++) {
-    printf("  %s\n", fuse_args[i]);
-  }
-
-  // printf("Mount point: %s\n", mount_point);
-  printf("sizeof inode: %zu\n", sizeof(struct wfs_inode));
-
+    
   // Pass FUSE options to fuse_main
   fuse_args[fuse_argc++] = mount_point; // Add mount point to FUSE args
   fuse_args[fuse_argc] = NULL;          // Null-terminate for FUSE
   init_disks(disks, num_disks);
 
-  return fuse_main(argc, argv, &ops, NULL);
+  return fuse_main(fuse_argc, fuse_args, &ops, NULL);
 }
