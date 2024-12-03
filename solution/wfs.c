@@ -83,7 +83,7 @@ int traverse_path(const char *path) {
       if (blocks[i] == 0) {
         continue;
       }
-      printf("checking block %i\n", i);
+      printf("checking block %i of inode %i\n", i, current_inode->num);
 
       struct wfs_dentry *entries =
           (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr + blocks[i]);
@@ -117,9 +117,10 @@ int traverse_path(const char *path) {
 
     // printf("Updating current inode to inode num: %d\n", inode_num);
     // file/dir exists
-    current_inode = (struct wfs_inode *)((char *)maps[0] +
+    current_inode = (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
                                          inode_num * sizeof(struct wfs_inode));
-    //  printf("Current inode updated to address: %p\n", (void *)current_inode);
+                                    
+    //printf("Current inode updated to : %p\n", (void *)current_inode);
 
     token = strtok(NULL, "/");
   }
@@ -242,8 +243,16 @@ int allocate_dentry(char *name, int parent_inode_num, int inode_num) {
       
       dentry[0].num = inode_num;
       strcpy(dentry[0].name, name);
-      printf("Allocated dentry with new block %d for inode %d in parent inode %d\n",
-             i, inode_num, parent_inode_num);
+
+      // increment nlink of parent
+      struct wfs_inode *inode =
+      (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                           inode_num * sizeof(struct wfs_inode));
+      inode->nlinks++;
+
+
+      printf("Allocated dentry %s with new block %d for inode %d in parent inode %d\n",
+             name, i, inode_num, parent_inode_num);
                  
      
       return 0;
@@ -258,6 +267,11 @@ int allocate_dentry(char *name, int parent_inode_num, int inode_num) {
         if (dentry[j].num == 0 && dentry[j].name[0] == 0){
           dentry[j].num = inode_num;
           strcpy(dentry[j].name, name);
+          // increment nlink of parent
+      struct wfs_inode *inode =
+      (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                           inode_num * sizeof(struct wfs_inode));
+      inode->nlinks++;
 
           printf("Allocated dentry: %s for inode %d in block %d at index %d in inode %d\n",
                  dentry[j].name, inode_num, i, j, parent_inode_num);
@@ -377,38 +391,65 @@ int init_disks(char *disk_files[], int disk_count) {
 
 // fuse functions
 
-static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
-  printf("mknod: %s\n", path);
+static int wfs_mknod(const char *path, mode_t mode,  dev_t dev) {
+  (void)dev;
+  mode_t d_mode = S_IFREG | mode; //change: change the mode
+  printf("mkdir: %s\n", path);
   if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
+    printf("Error in mkdir: Invalid path.\n");
     return -ENOENT;
   }
 
   // Allocate a copy of the path to manipulate
   char *path_copy = malloc(strlen(path) + 1);
   if (!path_copy) {
+    printf("Error in mkdir: No space for path copy.\n");
     return -ENOSPC;
   }
+ 
   strcpy(path_copy, path);
-
+  
+  
   // Find parent directory path and directory name
   char *last_slash = strrchr(path_copy, '/');
-  if (!last_slash || last_slash == path_copy) {
+  
+  if (!last_slash) {
+    printf("Error in mkdir: Invalid path.\n");
     free(path_copy);
     return -ENOENT;
   }
 
-  // set parent path and new dir name
-  *last_slash = '\0';
-  char *parent_path = path_copy;
-  char *dir_name = last_slash + 1;
+  // Initialize parent_path and dir_name
+  char *parent_path = NULL;
+  char *dir_name = NULL;
+
+  if (last_slash == path_copy) 
+  {
+    //root case
+    parent_path = "/";
+    dir_name = ((char*)last_slash + 1);
+  }
+  else
+  {
+    *last_slash = '\0';
+    parent_path = path_copy;
+    dir_name = ((char*)last_slash + 1);
+  }
+
+  //printf("parent_path: %s\n", parent_path);
+  //printf("dir_name: %s\n", dir_name);
 
   if (strlen(dir_name) == 0) {
+    printf("Error in mkdir: Invalid directory name len is 0.\n");
     free(path_copy);
     return -ENOENT;
   }
 
+
   int parent_inode_num = traverse_path(parent_path);
+  //printf("parent_inode_num: %d\n", parent_inode_num);
   if (parent_inode_num < 0) {
+    printf("Error in mkdir: Parent directory does not exist.\n");
     free(path_copy);
     return parent_inode_num;
   }
@@ -419,14 +460,18 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
 
   // check if dir already exists
   int existing_inode_num = traverse_path(path);
+  //printf("existing_inode_num: %d\n", existing_inode_num);
   if (existing_inode_num >= 0) {
     free(path_copy);
+    printf("Directory already exists.\n");
     return -EEXIST; // Directory already exists
   }
 
   // allocate a new inode
-  int new_inode_num = allocate_inode(mode);
+  int new_inode_num = allocate_inode(d_mode);
+  //printf("new_inode_num: %d\n", new_inode_num);
   if (new_inode_num < 0) {
+    printf("Failed to allocate new inode.\n");
     free(path_copy);
     return -ENOSPC;
   }
@@ -434,21 +479,24 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
   struct wfs_inode *new_inode =
       (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
                            new_inode_num * sizeof(struct wfs_inode));
-  new_inode->nlinks = 1; //changed from mkdir for file = 1 dir = 2
+  new_inode->nlinks = 1; //change: set nlinks to 1
 
-    if (allocate_dentry(dir_name, parent_inode_num, new_inode_num) < 0) 
-    {
-      free(path_copy);
-      return -ENOSPC; // No space in parent directory for new entry
-    }
+
+  if (allocate_dentry(dir_name, parent_inode_num, new_inode_num) < 0) 
+  {
+    printf("Error in alloc dentry: No space in parent directory for new entry.\n");
+    free(path_copy);
+    return -ENOSPC; // No space in parent directory for new entry
+  }
   // Update parent directory's metadata
-  //parent_inode->nlinks++;
+  // parent_inode->nlinks++;
   parent_inode->mtim = time(NULL);
+  //change: dont inc size becase of file
 
   free(path_copy);
-  printf("end traverse path\n");
   return 0;
 }
+
 
 static int wfs_mkdir(const char *path, mode_t mode) {
   mode_t d_mode = S_IFDIR | mode;
@@ -537,7 +585,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
   struct wfs_inode *new_inode =
       (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
                            new_inode_num * sizeof(struct wfs_inode));
-  new_inode->nlinks = 0;
+  new_inode->nlinks = 1;
 
 
   if (allocate_dentry(dir_name, parent_inode_num, new_inode_num) < 0) 
@@ -547,7 +595,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
     return -ENOSPC; // No space in parent directory for new entry
   }
   // Update parent directory's metadata
-  parent_inode->nlinks++;
+  // parent_inode->nlinks++;
   parent_inode->mtim = time(NULL);
   parent_inode->size += 1;
 
