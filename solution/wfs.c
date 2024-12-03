@@ -390,6 +390,51 @@ int init_disks(char *disk_files[], int disk_count) {
 }
 
 // fuse functions
+static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) 
+{
+    (void)offset; 
+    (void)fi;
+
+    printf("readdir: %s\n", path);
+    int dir_inode_num = traverse_path(path);
+    if (dir_inode_num < 0) {
+        printf("Error in readdir: Directory not found: %s\n", path);
+        return -ENOENT;
+    }
+
+    struct wfs_inode *dir_inode = (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr + dir_inode_num * sizeof(struct wfs_inode));
+    if (!is_directory(dir_inode->mode)) {
+        printf("Error in readdir: Path is not a directory: %s\n", path);
+        return -ENOTDIR;
+    }
+
+    filler(buf, ".", NULL, 0); 
+    filler(buf, "..", NULL, 0);
+
+    for(int i = 0; i < D_BLOCK; i++)
+    {
+      if(dir_inode->blocks[i] == 0)
+      {
+        //skip unused blocks
+        continue;
+      }
+
+      //get directories in this block
+      struct wfs_dentry *entries = (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr + dir_inode->blocks[i]);
+
+      for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) 
+      {
+            // Non-empty entry
+            if (entries[j].name[0] != '\0')
+            { 
+                printf("readdir: Found entry '%s'\n", entries[j].name);
+                filler(buf, entries[j].name, NULL, 0); // Add entry to the result buffer
+            }
+        }
+    }
+    
+    return 0;
+}
 
 static int wfs_mknod(const char *path, mode_t mode,  dev_t dev) {
   (void)dev;
@@ -631,7 +676,7 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
 
 // FUSE operations
 static struct fuse_operations ops = {
-    .getattr = wfs_getattr, .mkdir = wfs_mkdir, .mknod = wfs_mknod,
+    .getattr = wfs_getattr, .mkdir = wfs_mkdir, .mknod = wfs_mknod, .readdir = wfs_readdir
     // Add other functions (read, write, mkdir, etc.) here as needed
 };
 
