@@ -66,6 +66,9 @@ int traverse_path(const char *path) {
   char *token = strtok(path_copy, "/");
   
   while (token != NULL) {
+    if (strcmp(token, "") == 0) {
+      token = strtok(NULL, "/");
+    }
     // printf("Processing token: %s\n", token);
     // process token
     int inode_num = -1;
@@ -100,6 +103,7 @@ int traverse_path(const char *path) {
     }
 
     if (inode_num == -1) {
+      printf("Traversal: Path not found: %s\n", path);
       free(path_copy);
       return -1;
     }
@@ -113,8 +117,8 @@ int traverse_path(const char *path) {
     token = strtok(NULL, "/");
   }
 
+  printf("Traverse: Found inode: %d for path: %s\n", inode, path);
   free(path_copy);
-  // printf("Returning inode: %d\n", inode);
   return inode;
 }
 /*
