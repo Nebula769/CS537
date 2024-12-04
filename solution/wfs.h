@@ -9,6 +9,7 @@
 #define D_BLOCK (6)              // direct data blocks inode can ref
 #define IND_BLOCK (D_BLOCK + 1)  // index of indirect block in inode
 #define N_BLOCKS (IND_BLOCK + 1) // total number of block pointers in inode
+#define N_POINTERS (BLOCK_SIZE / sizeof(off_t))
 
 /*
   The fields in the superblock should reflect the structure of the filesystem.

@@ -169,6 +169,43 @@ int allocate_inode(mode_t mode) {
   return -1;
 }
 
+int free_inode(int inode_num) 
+{
+  unsigned char *i_bitmap =
+        (unsigned char *)((char *)maps[0] + sb_array[0]->i_bitmap_ptr);
+
+    // Ensure the inode number is within the valid range
+    if (inode_num < 0 || inode_num >= sb_array[0]->num_inodes) {
+        printf("free_inode: Inode %d is out of range.\n", inode_num);
+        return -EINVAL; // Invalid argument
+    }
+
+    // Calculate the byte index using /4 logic
+    int byte_index = inode_num / 8; 
+    int bit_offset = inode_num % 8; //index of the byte in the bitmap that has the bit coorepsonding to a specific inode
+
+    // Debugging print to ensure calculations are correct
+    printf("free_inode: Calculated byte_index = %d, bit_offset = %d for inode %d\n", byte_index, bit_offset, inode_num);
+
+    // Check if the inode is already free
+    if (!(i_bitmap[byte_index] & (1 << bit_offset))) {
+        printf("free_inode: Inode %d is already free.\n", inode_num);
+        return -EINVAL; // Invalid argument
+    }
+
+    // Mark the inode as free in the bitmap
+    i_bitmap[byte_index] &= ~(1 << bit_offset);
+
+    // Clear the inode structure
+    struct wfs_inode *inode = 
+        (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                             inode_num * sizeof(struct wfs_inode));
+    memset(inode, 0, sizeof(struct wfs_inode)); // Reset all inode fields to zero
+
+    printf("free_inode: Successfully freed inode %d.\n", inode_num);
+    return 0; // Success
+}
+
 /*
  * Allocate a new free data block in the filesystem
  * Return the off_t of data block if successful, otherwise return -1
@@ -387,6 +424,252 @@ int init_disks(char *disk_files[], int disk_count) {
   }
 
   return 0;
+}
+
+static int wfs_unlink(const char* path) 
+{
+  printf("unlink: %s\n", path);
+
+  // Validate the path
+    if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
+        printf("Error in unlink: Invalid path.\n");
+        return -EINVAL; // Invalid argument
+    }
+
+    // Make a modifiable copy of the path
+    char *path_copy = malloc(strlen(path) + 1);
+    if (!path_copy) {
+        printf("Error in unlink: No space for path copy.\n");
+        return -ENOMEM; // Out of memory
+    }
+    strcpy(path_copy, path);
+
+    // Find parent directory path and file name
+    char *last_slash = strrchr(path_copy, '/');
+    if (!last_slash) {
+        printf("Error in unlink: Invalid path.\n");
+        free(path_copy);
+        return -ENOENT; // No such file or directory
+    }
+
+    // Initialize parent_path and file_name
+    char *parent_path = NULL;
+    char *file_name = NULL;
+
+    // Handle root directory case
+    if (last_slash == path_copy) {
+        parent_path = "/";
+        file_name = last_slash + 1;
+    } else {
+        *last_slash = '\0'; // Split the path into parent and file name
+        parent_path = path_copy;
+        file_name = last_slash + 1;
+    }
+
+    // Traverse to the parent directory
+    int parent_inode_num = traverse_path(parent_path);
+    if (parent_inode_num < 0) {
+        printf("Error in unlink: Parent directory not found.\n");
+        free(path_copy);
+        return parent_inode_num;
+    }
+
+    // Get the parent inode
+    struct wfs_inode *parent_inode =
+        (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                             parent_inode_num * sizeof(struct wfs_inode));
+
+    // Traverse to the file to be unlinked
+    int file_inode_num = traverse_path(path);
+    if (file_inode_num < 0) {
+        printf("Error in unlink: File not found: %s\n", path);
+        free(path_copy);
+        return -ENOENT;
+    }
+
+    // Get the file's inode
+    struct wfs_inode *file_inode =
+        (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                             file_inode_num * sizeof(struct wfs_inode));
+
+    // Check if the target is a regular file
+    if (!is_regular_file(file_inode->mode)) {
+        printf("Error in unlink: Path is not a file: %s\n", path);
+        free(path_copy);
+        return -EISDIR; // Is a directory
+    }
+
+    // Remove the file's directory entry from the parent directory
+    int entry_removed = 0;
+    for (int i = 0; i < D_BLOCK; i++) {
+        if (parent_inode->blocks[i] != 0) {
+            struct wfs_dentry *entries = 
+                (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr + parent_inode->blocks[i]);
+            for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
+                if (entries[j].num == file_inode_num) {
+                    memset(&entries[j], 0, sizeof(struct wfs_dentry)); // Clear the directory entry
+                    printf("unlink: Removed directory entry for %s\n", file_name);
+                    entry_removed = 1;
+                    break;
+                }
+            }
+        }
+        if (entry_removed) {
+            break;
+        }
+    }
+
+    if (!entry_removed) {
+        printf("Error in unlink: Failed to remove directory entry for %s\n", file_name);
+        free(path_copy);
+        return -ENOENT;
+    }
+
+    // Decrement the nlinks and free the inode if necessary
+    file_inode->nlinks--;
+    printf("unlink: Decremented nlinks for inode %d, remaining links: %d\n", file_inode_num, file_inode->nlinks);
+    if (file_inode->nlinks == 0) {
+        printf("unlink: No more hard links, freeing inode %d.\n", file_inode_num);
+        int free_result = free_inode(file_inode_num);
+        if (free_result < 0) {
+            printf("Error in unlink: Failed to free inode for %s\n", path);
+            free(path_copy);
+            return free_result;
+        }
+    }
+
+    // Update parent directory metadata
+    // parent_inode->mtim = time(NULL); do we need to update time?
+ 
+
+    free(path_copy);
+    printf("unlink: Successfully unlinked file: %s\n", path);
+    return 0;
+  
+}
+static int wfs_rmdir(const char* path) 
+{
+  printf("rmdir: %s\n", path);
+
+  // Validate the path(path(null), path empty, path if root which cant be removed
+  if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
+      printf("Error in rmdir: Invalid path.\n");
+      return -EINVAL; // Invalid argument
+  }
+
+  // Make a modifiable copy of the path
+  char *path_copy = malloc(strlen(path) + 1);
+  if (!path_copy) {
+      printf("Error in rmdir: No space for path copy.\n");
+      return -ENOMEM; // Out of memory
+  }
+  strcpy(path_copy, path);
+
+  // Find parent directory path and directory name
+  char *last_slash = strrchr(path_copy, '/');
+  if (!last_slash) {
+      printf("Error in rmdir: Invalid path.\n");
+      free(path_copy);
+      return -ENOENT; // No such file or directory
+  }
+
+  // Initialize parent_path and dir_name
+  char *parent_path = NULL;
+  char *dir_name = NULL;
+
+  //if the last / is the first char /dir the parent path is root /
+  if (last_slash == path_copy) {
+      // Root case
+      parent_path = "/";
+      dir_name = last_slash + 1;
+  //othereise split path copt into parent path and dir name
+  } else {
+      *last_slash = '\0'; // Split the path into parent and directory name
+      parent_path = path_copy;
+      dir_name = last_slash + 1;
+  }
+
+  // Traverse to the parent directory-find inode numver of parent director
+  int parent_inode_num = traverse_path(parent_path);
+  if (parent_inode_num < 0) {
+      printf("Error in rmdir: Parent directory not found.\n");
+      free(path_copy);
+      return parent_inode_num;
+  }
+
+  //get the parent inode
+  struct wfs_inode *parent_inode =
+      (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                            parent_inode_num * sizeof(struct wfs_inode));
+
+    // Traverse to the directory to be removed
+    int dir_inode_num = traverse_path(path);
+    if (dir_inode_num < 0) {
+        printf("Error in rmdir: Directory not found: %s\n", path);
+        free(path_copy);
+        return -ENOENT; 
+    }
+
+    //get the inode of the directory
+    struct wfs_inode *dir_inode =
+      (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                            dir_inode_num * sizeof(struct wfs_inode));
+    
+     // Check if the target is a directory
+    if (!is_directory(dir_inode->mode)) {
+        printf("Error in rmdir: Path is not a directory: %s\n", path);
+        free(path_copy);
+        return -ENOTDIR; // Not a directory
+    }
+
+    // Check if the directory is empty (apart from "." and "..")
+    //loop thru the directory data blocks
+    for (int i = 0; i < D_BLOCK; i++) {
+        if (dir_inode->blocks[i] != 0) {
+            struct wfs_dentry *entries = (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr + dir_inode->blocks[i]);
+            for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
+                if (entries[j].name[0] != '\0' && strcmp(entries[j].name, ".") != 0 && strcmp(entries[j].name, "..") != 0) {
+                    printf("Error in rmdir: Directory is not empty: %s\n", path);
+                    free(path_copy);
+                    return -ENOTEMPTY; // Directory not empty
+                }
+            }
+        }
+    }
+
+    // Remove the directory entry from the parent directory
+    for (int i = 0; i < D_BLOCK; i++) {
+        if (parent_inode->blocks[i] != 0) {
+            struct wfs_dentry *entries = (struct wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr + parent_inode->blocks[i]);
+            for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
+                if (entries[j].num == dir_inode_num) {
+                    memset(&entries[j], 0, sizeof(struct wfs_dentry)); // Clear the directory entry
+                    printf("rmdir: Removed directory entry for %s\n", dir_name);
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Decrement the nlinks and free the inode if necessary
+    dir_inode->nlinks--;
+    printf("rmdir: Decremented nlinks for inode %d, remaining links: %d\n", dir_inode_num, dir_inode->nlinks);
+    if (dir_inode->nlinks == 0) {
+        printf("rmdir: No more hard links, freeing inode %d.\n", dir_inode_num);
+        int free_result = free_inode(dir_inode_num);
+        if (free_result < 0) {
+            printf("Error in rmdir: Failed to free inode for %s\n", path);
+            free(path_copy);
+            return free_result;
+        }
+    }
+
+    parent_inode->size--;
+    //should we do something with time here? 
+
+    printf("rmdir: Successfully removed directory: %s\n", path);
+    free(path_copy);
+    return 0;
 }
 
 // fuse functions
@@ -674,9 +957,267 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
   return 0; // Return 0 on success
 }
 
+static int wfs_read(const char* path, char *buf, size_t size, off_t offset, struct fuse_file_info* fi) 
+{
+ (void)fi;
+    // Find the inode number of the file specified by the path
+    int file_inode_num = traverse_path(path);
+    if (file_inode_num < 0) {
+        printf("Error in read: File not found: %s\n", path);
+        return -ENOENT; // File not found
+    }
+
+    struct wfs_inode *file_inode = (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr + file_inode_num * sizeof(struct wfs_inode));
+    int direct_bytes = (D_BLOCK + 1) * BLOCK_SIZE; // Total size accessible by direct blocks
+
+    // Ensure the read does not go beyond the file's size
+    if (offset >= file_inode->size) {
+        printf("Error in read: Offset is beyond file size.\n");
+        return 0; // EOF
+    }
+
+    if (offset + size > file_inode->size) {
+        size = file_inode->size - offset; // Adjust size to read up to the file's end
+    }
+
+    //size_t original_size = size;
+    size_t total_read = 0;
+
+    // Case 1: Read from direct blocks
+    if (offset < direct_bytes) {
+        //int num_blocks = (size + (BLOCK_SIZE - 1)) / BLOCK_SIZE;
+        int starting_block = offset / BLOCK_SIZE;
+        int byte_offset = offset % BLOCK_SIZE;
+
+        for (int i = starting_block; i < D_BLOCK && size > 0; i++) {
+            if (file_inode->blocks[i] == 0) {
+                printf("read: Attempted to read from an unallocated block.\n");
+                break; // Stop if the block is not allocated
+            }
+
+            char *block_ptr = (char *)maps[0] + sb_array[0]->d_blocks_ptr + file_inode->blocks[i];
+            size_t read_size = BLOCK_SIZE - byte_offset;
+            if (read_size > size) {
+                read_size = size;
+            }
+
+            memcpy(buf, block_ptr + byte_offset, read_size);
+            buf += read_size;
+            size -= read_size;
+            total_read += read_size;
+            byte_offset = 0; // Reset offset for the next block
+        }
+    }
+
+    // Case 2: Read from indirect blocks if needed
+    if (size > 0) {
+        off_t *indirect_blocks = (off_t *)((char *)maps[0] + sb_array[0]->d_blocks_ptr + file_inode->blocks[IND_BLOCK]);
+        int starting_indirect_block = (offset > direct_bytes) ? (offset - direct_bytes) / BLOCK_SIZE : 0;
+        int byte_offset = (offset > direct_bytes) ? (offset - direct_bytes) % BLOCK_SIZE : 0;
+
+        int num_indirect_blocks = (size + (BLOCK_SIZE - 1)) / BLOCK_SIZE;
+
+        for (int i = starting_indirect_block; i < num_indirect_blocks && size > 0; i++) {
+            if (indirect_blocks[i] == 0) {
+                printf("read: Attempted to read from an unallocated indirect block.\n");
+                break; // Stop if the indirect block is not allocated
+            }
+
+            char *block_ptr = (char *)maps[0] + sb_array[0]->d_blocks_ptr + indirect_blocks[i];
+            size_t read_size = BLOCK_SIZE - byte_offset;
+            if (read_size > size) {
+                read_size = size;
+            }
+
+            memcpy(buf, block_ptr + byte_offset, read_size);
+            buf += read_size;
+            size -= read_size;
+            total_read += read_size;
+            byte_offset = 0; // Reset offset for the next block
+        }
+    }
+
+    printf("read: Successfully read %zu bytes from %s\n", total_read, path);
+    return total_read; // Return the total number of bytes read
+}
+/*
+* Write data to a file
+* Return the number of bytes written if successful, otherwise return error code
+*/
+static int wfs_write(const char* path, const char *buf, size_t size, off_t offset, struct fuse_file_info* fi) {
+  (void)fi;
+  //finds the file inode
+  int file_inode_num = traverse_path(path);
+  if (file_inode_num < 0) {
+    printf("Error in write: File not found: %s\n", path);
+    return -ENOENT;
+  }
+
+  //saves original size of file
+  int original_size = size;
+  struct wfs_inode *file_inode = (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr + file_inode_num * sizeof(struct wfs_inode));
+  //total size that can be acessed by the data blocks
+  int direct_bytes = (D_BLOCK + 1) * BLOCK_SIZE;
+
+  //direct block case
+  if (offset + size <= direct_bytes) {
+    // write data into block
+    int num_blocks = (size + (BLOCK_SIZE - 1)) / BLOCK_SIZE;
+    int starting_block = offset / BLOCK_SIZE;
+    int byte_offset = offset % BLOCK_SIZE;
+
+    for (int i = starting_block; i < starting_block + num_blocks; i++) {
+
+      if (file_inode->blocks[i] == 0) {
+        // allocate new data block
+        off_t datablock = allocate_data_block();
+        if (datablock < 0) {
+          return -ENOSPC; // No space for new data block
+        }
+        file_inode->blocks[i] = datablock;
+      }
+
+      char *block_ptr = (char *)maps[0] + sb_array[0]->d_blocks_ptr + file_inode->blocks[i];
+      int writeSize = BLOCK_SIZE - byte_offset;
+      if (i == starting_block + num_blocks - 1) {
+        writeSize = size;
+      }
+      memcpy(block_ptr + byte_offset, buf, writeSize);
+      size -= writeSize;
+      byte_offset = 0;
+      buf += writeSize;
+      }
+
+      if (size != 0) {
+        printf("Error in write: Incomplete write.\n");
+        return -1;
+      }
+      
+      file_inode->size += original_size;
+      time_t current_time = time(NULL);
+      file_inode->atim = current_time;
+      file_inode->mtim = current_time;
+
+      return original_size;
+    
+   
+  } else {
+    // write into indirect block
+    // write into direct blocks first then handle remaining size with indirect block
+    
+    // write into both direct and indirect blocks
+    if (offset < direct_bytes) {
+      // write into direct blocks first
+      int direct_bytes_size = direct_bytes - offset;
+      int remaining_size = size - direct_bytes_size;
+
+      int num_blocks = (direct_bytes_size + (BLOCK_SIZE - 1)) / BLOCK_SIZE;
+      int starting_block = offset / BLOCK_SIZE;
+      int byte_offset = offset % BLOCK_SIZE;
+
+      for (int i = starting_block; i < starting_block + num_blocks; i++) {
+
+          if (file_inode->blocks[i] == 0) {
+            // allocate new data block
+            off_t datablock = allocate_data_block();
+            if (datablock < 0) {
+              return -ENOSPC; // No space for new data block
+            }
+            file_inode->blocks[i] = datablock;
+          }
+
+        char *block_ptr = (char *)maps[0] + sb_array[0]->d_blocks_ptr + file_inode->blocks[i];
+        int writeSize = BLOCK_SIZE - byte_offset;
+        memcpy(block_ptr + byte_offset, buf, writeSize);
+        size -= writeSize;
+        byte_offset = 0;
+        buf += writeSize;
+      }
+      // write into indirect block
+      off_t *indirect_blocks = (off_t *) ((char *)maps[0] + sb_array[0]->d_blocks_ptr + file_inode->blocks[IND_BLOCK]);
+      int num_indirect_blocks = (remaining_size + (BLOCK_SIZE - 1)) / BLOCK_SIZE;
+
+      if (num_indirect_blocks > N_POINTERS) {
+        printf("Error in write: File too large.\n");
+        return -ENOSPC;
+      }
+      
+      for (int i = 0; i < num_indirect_blocks; i++) {
+        if (indirect_blocks[i] == 0) {
+          // allocate new data block
+          off_t datablock = allocate_data_block();
+          if (datablock < 0) {
+            return -ENOSPC; // No space for new data block
+          }
+          indirect_blocks[i] = datablock;
+        }
+
+        char *block_ptr = (char *)maps[0] + sb_array[0]->d_blocks_ptr + indirect_blocks[i];
+        int writeSize = BLOCK_SIZE;
+        if (i ==  num_indirect_blocks - 1) {
+          writeSize = remaining_size;
+        }
+        memcpy(block_ptr, buf, writeSize);
+        size -= writeSize;
+        buf += writeSize;
+      }
+
+      if (size != 0) {
+        printf("Error in write: Incomplete write.\n");
+        return -1;
+      }
+      file_inode->size += original_size;
+      time_t current_time = time(NULL);
+      file_inode->atim = current_time;
+      file_inode->mtim = current_time;
+
+      return original_size;
+
+    } else {
+      // write starting only from indirect block
+      off_t *indirect_blocks = (off_t *) ((char *)maps[0] + sb_array[0]->d_blocks_ptr + file_inode->blocks[IND_BLOCK]);
+      int num_indirect_blocks = (size + (BLOCK_SIZE - 1)) / BLOCK_SIZE;
+
+      int starting_block = offset / BLOCK_SIZE;
+      int byte_offset = offset % BLOCK_SIZE;
+
+      for (int i = starting_block; i < starting_block + num_indirect_blocks; i++) {
+
+          if (indirect_blocks[i] == 0) {
+            // allocate new data block
+            off_t datablock = allocate_data_block();
+            if (datablock < 0) {
+              return -ENOSPC; // No space for new data block
+            }
+            indirect_blocks[i] = datablock;
+          }
+
+        char *block_ptr = (char *)maps[0] + sb_array[0]->d_blocks_ptr + indirect_blocks[i];
+        int writeSize = BLOCK_SIZE - byte_offset;
+        if (i == starting_block + num_indirect_blocks - 1) {
+          writeSize = size;
+        }
+        memcpy(block_ptr + byte_offset, buf, writeSize);
+        size -= writeSize;
+        byte_offset = 0;
+        buf += writeSize;
+      }
+
+      if (size != 0) {
+        printf("Error in write: Incomplete write.\n");
+        return -1;
+      }
+
+      return original_size;
+
+    }
+
+  }
+}
+
 // FUSE operations
 static struct fuse_operations ops = {
-    .getattr = wfs_getattr, .mkdir = wfs_mkdir, .mknod = wfs_mknod, .readdir = wfs_readdir
+    .getattr = wfs_getattr, .mkdir = wfs_mkdir, .mknod = wfs_mknod, .readdir = wfs_readdir, .write = wfs_write, .rmdir = wfs_rmdir, .unlink = wfs_unlink, .read = wfs_read
     // Add other functions (read, write, mkdir, etc.) here as needed
 };
 
