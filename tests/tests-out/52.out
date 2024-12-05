@@ -1,2 +1,3 @@
 Correct
-file1 readback does not match data written
+Correct
+total allocated datablocks on all disks: found 54 expected either 18 or 20.

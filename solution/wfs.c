@@ -189,9 +189,9 @@ int allocate_inode(mode_t mode, int disk_index) {
     return -1;
 }
 
-int free_inode(int inode_num) {
+int free_inode(int inode_num, int disk_index) {
     unsigned char *i_bitmap =
-        (unsigned char *)((char *)maps[0] + sb_array[0]->i_bitmap_ptr);
+        (unsigned char *)((char *)maps[disk_index] + sb_array[0]->i_bitmap_ptr);
 
     // Ensure the inode number is within the valid range
     if (inode_num < 0 || inode_num >= sb_array[0]->num_inodes) {
@@ -219,6 +219,7 @@ int free_inode(int inode_num) {
 
     // Mark the inode as free in the bitmap
     i_bitmap[byte_index] &= ~(1 << bit_offset);
+    
 
     // Clear the inode structure
     struct wfs_inode *inode =
@@ -593,7 +594,9 @@ static int wfs_unlink(const char *path) {
     printf("unlink: Successfully unlinked file: %s\n", path);
     return 0;
 }
-static int wfs_rmdir(const char *path) {
+
+int rmdir_helper(const char *path, int disk_index) 
+{
     printf("rmdir: %s\n", path);
 
     // Validate the path(path(null), path empty, path if root which cant be
@@ -729,6 +732,27 @@ static int wfs_rmdir(const char *path) {
     printf("rmdir: Successfully removed directory: %s\n", path);
     free(path_copy);
     return 0;
+}
+static int wfs_rmdir(const char *path) 
+{
+    printf("wfs_rmdir: %s\n", path);
+
+    if (raid < 3) {
+        int disk = 0;  // Operate on the first disk
+        int result = rmdir_helper(path, disk);
+        if (result < 0) {
+            printf("Error: Failed to remove directory on disk %d\n", disk);
+            return result;
+        }
+        sync_disks();
+        return 0;
+    } else if (raid == 0) {
+        // Implement RAID 0 logic if applicable
+    } else if (raid == 2) {
+        // Implement RAID 2 logic if applicable
+    }
+
+    return -1;  // Return error if RAID level is unsupported
 }
 
 // fuse functions
@@ -994,19 +1018,16 @@ int mkdir_helper(const char *path, mode_t mode, int disk_index) {
 
 static int wfs_mkdir(const char *path, mode_t mode) {
     printf("mkdir: %s\n", path);
+    int disk = 0;
     if (raid < 3) {
-        for (int disk = 0; disk < num_disks; disk++) {
-            if (mkdir_helper(path, mode, disk) < 0) {
-                printf("Error: Failed to create directory on disk %d\n", disk);
-                return -ENOSPC;
-            }
-        }
+        int i = mkdir_helper(path, mode, disk);
         sync_disks();
+        return i;
     } else if (raid == 0) {
     } else if (raid == 2) {
     }
 
-    return 0;
+    return -1;
 }
 
 static int wfs_getattr(const char *path, struct stat *stbuf) {
@@ -1034,9 +1055,8 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
 
     return 0;  // Return 0 on success
 }
-
-static int wfs_read(const char *path, char *buf, size_t size, off_t offset,
-                    struct fuse_file_info *fi) {
+static int read_helper(const char *path, char *buf, size_t size, off_t offset,
+                       struct fuse_file_info *fi) {
     (void)fi;
     printf("read: %s\n", path);
     printf("size: %zu, offset: %ld\n", size, offset);
@@ -1075,7 +1095,8 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset,
         for (int i = starting_block; i < IND_BLOCK && size > 0; i++) {
             if (file_inode->blocks[i] == 0) {
                 printf(
-                    "read: Attempted to read from an unallocated block %d.\n",
+                    "read: Attempted to read from an unallocated block "
+                    "%d.\n",
                     i);
                 break;  // Stop if the block is not allocated
             }
@@ -1147,13 +1168,22 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset,
     printf("read: Successfully read %zu bytes from %s\n", total_read, path);
     return total_read;  // Return the total number of bytes read
 }
-/*
- * Write data to a file
- * Return the number of bytes written if successful, otherwise return error
- * code
- */
-static int wfs_write(const char *path, const char *buf, size_t size,
-                     off_t offset, struct fuse_file_info *fi) {
+static int wfs_read(const char *path, char *buf, size_t size, off_t offset,
+                    struct fuse_file_info *fi) {
+    (void)fi;
+    if (raid < 3) {
+        int i = read_helper(path, buf, size, offset, fi);
+        sync_disks();
+        return i;
+
+    } else if (raid == 0) {
+    } else if (raid == 2) {
+    }
+
+    return -1;
+}
+static int write_helper(const char *path, const char *buf, size_t size,
+                        off_t offset, struct fuse_file_info *fi) {
     (void)fi;
     printf("write: %s\n", path);
     printf("size: %zu\n", size);
@@ -1386,6 +1416,25 @@ static int wfs_write(const char *path, const char *buf, size_t size,
             return original_size;
         }
     }
+}
+
+/*
+ * Write data to a file
+ * Return the number of bytes written if successful, otherwise return error
+ * code
+ */
+static int wfs_write(const char *path, const char *buf, size_t size,
+                     off_t offset, struct fuse_file_info *fi) {
+    (void)fi;
+    if (raid < 3) {
+        int i = write_helper(path, buf, size, offset, fi);
+        sync_disks();
+        return i;
+    } else if (raid == 0) {
+    } else if (raid == 2) {
+    }
+
+    return -1;
 }
 
 // FUSE operations

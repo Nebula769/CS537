@@ -1,2 +1,2 @@
 Correct
-allocated inodes on test-disk2: found 1 expected 19
+total allocated datablocks on all disks: found 6 expected 2

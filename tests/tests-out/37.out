@@ -1,1 +1,2 @@
-[Errno 28] No space left on device: 'd1'
+Correct
+allocated inodes on test-disk1: found 2 expected 1
