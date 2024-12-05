@@ -189,9 +189,9 @@ int allocate_inode(mode_t mode, int disk_index) {
     return -1;
 }
 
-int free_inode(int inode_num, int disk_index) {
+int free_inode(int inode_num) {
     unsigned char *i_bitmap =
-        (unsigned char *)((char *)maps[disk_index] + sb_array[0]->i_bitmap_ptr);
+        (unsigned char *)((char *)maps[0] + sb_array[0]->i_bitmap_ptr);
 
     // Ensure the inode number is within the valid range
     if (inode_num < 0 || inode_num >= sb_array[0]->num_inodes) {
@@ -218,7 +218,9 @@ int free_inode(int inode_num, int disk_index) {
     }
 
     // Mark the inode as free in the bitmap
+    printf("Before: 0x%x\n", i_bitmap[byte_index]);
     i_bitmap[byte_index] &= ~(1 << bit_offset);
+    printf("After: 0x%x\n", i_bitmap[byte_index]);
     
 
     // Clear the inode structure
@@ -465,8 +467,9 @@ int init_disks(char *disk_files[], int disk_count) {
     return 0;
 }
 
-static int wfs_unlink(const char *path) {
-    printf("unlink: %s\n", path);
+int unlink_helper(const char *path, int disk_index)
+{
+     printf("unlink: %s\n", path);
 
     // Validate the path
     if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
@@ -518,7 +521,7 @@ static int wfs_unlink(const char *path) {
                              parent_inode_num * sizeof(struct wfs_inode));
 
     // Traverse to the file to be unlinked
-    int file_inode_num = traverse_path(path, 0);
+    int file_inode_num = traverse_path(path, disk_index);
     if (file_inode_num < 0) {
         printf("Error in unlink: File not found: %s\n", path);
         free(path_copy);
@@ -574,7 +577,7 @@ static int wfs_unlink(const char *path) {
     file_inode->nlinks--;
     printf("unlink: Decremented nlinks for inode %d, remaining links: %d\n",
            file_inode_num, file_inode->nlinks);
-    if (file_inode->nlinks == 0) {
+    if (file_inode->nlinks >= 0) {
         printf("unlink: No more hard links, freeing inode %d.\n",
                file_inode_num);
         int free_result = free_inode(file_inode_num);
@@ -593,6 +596,23 @@ static int wfs_unlink(const char *path) {
     free(path_copy);
     printf("unlink: Successfully unlinked file: %s\n", path);
     return 0;
+}
+
+static int wfs_unlink(const char *path) 
+{
+    printf("wfs_unlink: %s\n", path);
+    int disk = 0;
+    if (raid < 3) {
+        int result = unlink_helper(path, disk);
+        sync_disks();
+        return result;
+    } else if (raid == 0) {
+        // Implement RAID 0 logic if applicable
+    } else if (raid == 2) {
+        // Implement RAID 2 logic if applicable
+    }
+
+    return -1;
 }
 
 int rmdir_helper(const char *path, int disk_index) 
@@ -716,7 +736,7 @@ int rmdir_helper(const char *path, int disk_index)
     dir_inode->nlinks--;
     printf("rmdir: Decremented nlinks for inode %d, remaining links: %d\n",
            dir_inode_num, dir_inode->nlinks);
-    if (dir_inode->nlinks == 0) {
+    if (dir_inode->nlinks >= 0) {
         printf("rmdir: No more hard links, freeing inode %d.\n", dir_inode_num);
         int free_result = free_inode(dir_inode_num);
         if (free_result < 0) {
@@ -735,24 +755,19 @@ int rmdir_helper(const char *path, int disk_index)
 }
 static int wfs_rmdir(const char *path) 
 {
-    printf("wfs_rmdir: %s\n", path);
-
+    printf("rmdir: %s\n", path);
+    int disk = 0;
     if (raid < 3) {
-        int disk = 0;  // Operate on the first disk
         int result = rmdir_helper(path, disk);
-        if (result < 0) {
-            printf("Error: Failed to remove directory on disk %d\n", disk);
-            return result;
-        }
         sync_disks();
-        return 0;
+        return result;
     } else if (raid == 0) {
         // Implement RAID 0 logic if applicable
     } else if (raid == 2) {
         // Implement RAID 2 logic if applicable
     }
 
-    return -1;  // Return error if RAID level is unsupported
+    return -1;
 }
 
 // fuse functions
@@ -799,8 +814,7 @@ static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     }
     return 0;
 }
-static int mknod_helper(const char *path, mode_t mode, dev_t dev) {
-    (void)dev;
+static int mknod_helper(const char *path, mode_t mode, int disk_index) {
     mode_t d_mode = S_IFREG | mode;  // change: change the mode
     printf("mkdir: %s\n", path);
     if (!path || strlen(path) == 0 || strcmp(path, "/") == 0) {
@@ -862,7 +876,7 @@ static int mknod_helper(const char *path, mode_t mode, dev_t dev) {
                              parent_inode_num * sizeof(struct wfs_inode));
 
     // check if dir already exists
-    int existing_inode_num = traverse_path(path, 0);
+    int existing_inode_num = traverse_path(path, disk_index);
     // printf("existing_inode_num: %d\n", existing_inode_num);
     if (existing_inode_num >= 0) {
         free(path_copy);
@@ -885,8 +899,7 @@ static int mknod_helper(const char *path, mode_t mode, dev_t dev) {
                              new_inode_num * sizeof(struct wfs_inode));
     new_inode->nlinks = 1;  // change: set nlinks to 1
 
-    int disks = 0;
-    if (allocate_dentry(dir_name, parent_inode_num, new_inode_num, disks) < 0) {
+    if (allocate_dentry(dir_name, parent_inode_num, new_inode_num, disk_index) < 0) {
         printf(
             "Error in alloc dentry: No space in parent directory for new "
             "entry.\n");
@@ -904,19 +917,17 @@ static int mknod_helper(const char *path, mode_t mode, dev_t dev) {
 
 static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
     (void)dev;
+    printf("mknod: %s\n", path);
+    int disk = 0;
     if (raid < 3) {
-        for (int disk = 0; disk < 1; disk++) {
-            if (mknod_helper(path, mode, dev) < 0) {
-                printf("Error: Failed to create file on disk %d\n", disk);
-                return -ENOSPC;
-            }
-        }
+        int i = mknod_helper(path, mode, disk);
         sync_disks();
+        return i;
     } else if (raid == 0) {
     } else if (raid == 2) {
     }
 
-    return 0;
+    return -1;
 }
 
 int mkdir_helper(const char *path, mode_t mode, int disk_index) {
