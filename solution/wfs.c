@@ -5,6 +5,7 @@
 #include <fuse.h>
 #include <limits.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,20 @@ int compare_disks(const void *a, const void *b) {
     return sb_a->disk_id - sb_b->disk_id;
 }
 
+int sync_disks() {
+    // copy disk 1 to all other disks
+    void *end_address = (char *)maps[0] + sb_array[0]->d_blocks_ptr +
+                        (sb_array[0]->num_data_blocks * BLOCK_SIZE);
+
+    size_t disk_size = (char *)end_address - (char *)maps[0];
+
+    for (int i = 1; i < num_disks; i++) {
+        memcpy(maps[i], maps[0], disk_size);
+    }
+
+    return 0;
+}
+
 int is_directory(mode_t mode) {
     return (mode & S_IFMT) == S_IFDIR;  // Check if it's a directory
 }
@@ -38,7 +53,7 @@ int is_regular_file(mode_t mode) {
  * Return the target inode if it exists, otherwise return -1
  * only iterate up to D_BLOCK (direct pointers)
  */
-int traverse_path(const char *path) {
+int traverse_path(const char *path, int disk_index) {
     // printf("traverse_path: %s\n", path);
 
     if (strcmp(path, "/") == 0) {
@@ -54,7 +69,8 @@ int traverse_path(const char *path) {
     strcpy(path_copy, path);
     // printf("Copied path: %s\n", path_copy);
     struct wfs_inode *root_inode =
-        (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr);
+        (struct wfs_inode *)((char *)maps[disk_index] +
+                             sb_array[0]->i_blocks_ptr);
 
     // printf("Root inode address: %p\n", (void *)root_inode);
 
@@ -84,7 +100,7 @@ int traverse_path(const char *path) {
             // printf("checking block %i of inode %i\n", i, current_inode->num);
 
             struct wfs_dentry *entries =
-                (struct wfs_dentry *)((char *)maps[0] +
+                (struct wfs_dentry *)((char *)maps[disk_index] +
                                       sb_array[0]->d_blocks_ptr + blocks[i]);
             // printf("Checking block %d at address %p\n", i, (void *)entries);
             // printf("maps[0]: %p, blocks[%d]: %ld, calculated address: %p\n",
@@ -119,7 +135,8 @@ int traverse_path(const char *path) {
         // printf("Updating current inode to inode num: %d\n", inode_num);
         // file/dir exists
         current_inode =
-            (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+            (struct wfs_inode *)((char *)maps[disk_index] +
+                                 sb_array[0]->i_blocks_ptr +
                                  inode_num * sizeof(struct wfs_inode));
 
         // printf("Current inode updated to : %p\n", (void *)current_inode);
@@ -219,9 +236,9 @@ int free_inode(int inode_num) {
  * Return the off_t of data block if successful, otherwise return -1
  *
  */
-off_t allocate_data_block() {
+off_t allocate_data_block(int disk_index) {
     unsigned char *d_bitmap =
-        (unsigned char *)((char *)maps[0] + sb_array[0]->d_bitmap_ptr);
+        (unsigned char *)((char *)maps[disk_index] + sb_array[0]->d_bitmap_ptr);
     int num_bytes = sb_array[0]->num_data_blocks / 8;
 
     for (int i = 0; i < num_bytes; i++) {
@@ -231,23 +248,24 @@ off_t allocate_data_block() {
                 d_bitmap[i] |= (1 << bit_index);
                 int block_num = i * 8 + bit_index;
 
-                int target_disk = block_num % num_disks;
+                // int target_disk = block_num % num_disks;
 
                 // hard code to disk 0
-                target_disk = 0;
+                // target_disk = 0;
 
                 // int block_offset = block_num / num_disks;
-                // printf("Allocating data block %d on disk %d\n", block_num,
+                printf("Allocating data block %d on disk %d\n", block_num,
+                       disk_index);
                 // target_disk);
 
                 // Initialize the data block
-                char *block_ptr = (char *)maps[target_disk] +
+                char *block_ptr = (char *)maps[disk_index] +
                                   sb_array[0]->d_blocks_ptr +
                                   block_num * BLOCK_SIZE;
 
                 memset(block_ptr, 0, BLOCK_SIZE);
                 off_t offset =
-                    (off_t)((char *)block_ptr - (char *)maps[target_disk]);
+                    (off_t)((char *)block_ptr - (char *)maps[disk_index]);
 
                 return offset;
             }
@@ -281,7 +299,7 @@ int allocate_dentry(char *name, int parent_inode_num, int inode_num,
     for (int i = 0; i < D_BLOCK; i++) {
         if (inode->blocks[i] == 0) {
             // allocate new data block and place dentry
-            off_t datablock = allocate_data_block();
+            off_t datablock = allocate_data_block(disk_index);
             if (datablock < 0) {
                 return -1;  // No space for new data block
             }
@@ -486,7 +504,7 @@ static int wfs_unlink(const char *path) {
     }
 
     // Traverse to the parent directory
-    int parent_inode_num = traverse_path(parent_path);
+    int parent_inode_num = traverse_path(parent_path, 0);
     if (parent_inode_num < 0) {
         printf("Error in unlink: Parent directory not found.\n");
         free(path_copy);
@@ -499,7 +517,7 @@ static int wfs_unlink(const char *path) {
                              parent_inode_num * sizeof(struct wfs_inode));
 
     // Traverse to the file to be unlinked
-    int file_inode_num = traverse_path(path);
+    int file_inode_num = traverse_path(path, 0);
     if (file_inode_num < 0) {
         printf("Error in unlink: File not found: %s\n", path);
         free(path_copy);
@@ -618,7 +636,7 @@ static int wfs_rmdir(const char *path) {
     }
 
     // Traverse to the parent directory-find inode numver of parent director
-    int parent_inode_num = traverse_path(parent_path);
+    int parent_inode_num = traverse_path(parent_path, 0);
     if (parent_inode_num < 0) {
         printf("Error in rmdir: Parent directory not found.\n");
         free(path_copy);
@@ -631,7 +649,7 @@ static int wfs_rmdir(const char *path) {
                              parent_inode_num * sizeof(struct wfs_inode));
 
     // Traverse to the directory to be removed
-    int dir_inode_num = traverse_path(path);
+    int dir_inode_num = traverse_path(path, 0);
     if (dir_inode_num < 0) {
         printf("Error in rmdir: Directory not found: %s\n", path);
         free(path_copy);
@@ -719,7 +737,7 @@ static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     (void)offset;
     (void)fi;
 
-    int dir_inode_num = traverse_path(path);
+    int dir_inode_num = traverse_path(path, 0);
     if (dir_inode_num < 0) {
         printf("Error in readdir: Directory not found: %s\n", path);
         return -ENOENT;
@@ -757,8 +775,7 @@ static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     }
     return 0;
 }
-
-static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
+static int mknod_helper(const char *path, mode_t mode, dev_t dev) {
     (void)dev;
     mode_t d_mode = S_IFREG | mode;  // change: change the mode
     printf("mkdir: %s\n", path);
@@ -808,7 +825,7 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
         return -ENOENT;
     }
 
-    int parent_inode_num = traverse_path(parent_path);
+    int parent_inode_num = traverse_path(parent_path, 0);
     // printf("parent_inode_num: %d\n", parent_inode_num);
     if (parent_inode_num < 0) {
         printf("Error in mkdir: Parent directory does not exist.\n");
@@ -821,7 +838,7 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
                              parent_inode_num * sizeof(struct wfs_inode));
 
     // check if dir already exists
-    int existing_inode_num = traverse_path(path);
+    int existing_inode_num = traverse_path(path, 0);
     // printf("existing_inode_num: %d\n", existing_inode_num);
     if (existing_inode_num >= 0) {
         free(path_copy);
@@ -859,6 +876,21 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
 
     free(path_copy);
     return 0;
+}
+
+static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
+    (void)dev;
+    if (raid < 3) {
+        for (int disk = 0; disk < 1; disk++) {
+            if (mknod_helper(path, mode, dev) < 0) {
+                printf("Error: Failed to create file on disk %d\n", disk);
+                return -ENOSPC;
+            }
+        }
+        sync_disks();
+    } else if (raid == 0) {
+    } else if (raid == 2) {
+    }
 }
 
 int mkdir_helper(const char *path, mode_t mode, int disk_index) {
@@ -906,7 +938,7 @@ int mkdir_helper(const char *path, mode_t mode, int disk_index) {
         return -ENOENT;
     }
 
-    int parent_inode_num = traverse_path(parent_path);
+    int parent_inode_num = traverse_path(parent_path, 0);
     if (parent_inode_num < 0) {
         printf("Error in mkdir: Parent directory does not exist.\n");
         free(path_copy);
@@ -918,43 +950,46 @@ int mkdir_helper(const char *path, mode_t mode, int disk_index) {
                              parent_inode_num * sizeof(struct wfs_inode));
 
     // check if dir already exists
-    int existing_inode_num = traverse_path(path);
-    // printf("existing_inode_num: %d\n", existing_inode_num);
-    if (existing_inode_num >= 0) {
-        free(path_copy);
-        printf("Directory already exists.\n");
-        return -EEXIST;  // Directory already exists
-    }
+    int existing_inode_num = traverse_path(path, disk_index);
+    // printf("existing_inode_num: %d for disk %d\n", existing_inode_num,
+           disk_index);
+           if (existing_inode_num >= 0) {
+               free(path_copy);
+               printf("Directory already exists.\n");
+               return -EEXIST;  // Directory already exists
+           }
 
-    // allocate a new inode
-    int new_inode_num = allocate_inode(d_mode, disk_index);
-    // printf("new_inode_num: %d\n", new_inode_num);
-    if (new_inode_num < 0) {
-        printf("Failed to allocate new inode.\n");
-        free(path_copy);
-        return -ENOSPC;
-    }
+           // allocate a new inode
+           int new_inode_num = allocate_inode(d_mode, disk_index);
+           // printf("new_inode_num: %d\n", new_inode_num);
+           if (new_inode_num < 0) {
+               printf("Failed to allocate new inode.\n");
+               free(path_copy);
+               return -ENOSPC;
+           }
 
-    struct wfs_inode *new_inode =
-        (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
-                             new_inode_num * sizeof(struct wfs_inode));
-    new_inode->nlinks = 1;
+           struct wfs_inode *new_inode =
+               (struct wfs_inode *)((char *)maps[0] +
+                                    sb_array[0]->i_blocks_ptr +
+                                    new_inode_num * sizeof(struct wfs_inode));
+           new_inode->nlinks = 1;
 
-    if (allocate_dentry(dir_name, parent_inode_num, new_inode_num, disk_index) <
-        0) {
-        printf(
-            "Error in alloc dentry: No space in parent directory for new "
-            "entry.\n");
-        free(path_copy);
-        return -ENOSPC;  // No space in parent directory for new entry
-    }
-    // Update parent directory's metadata
-    // parent_inode->nlinks++;
-    parent_inode->mtim = time(NULL);
-    parent_inode->size += 1;
+           if (allocate_dentry(dir_name, parent_inode_num, new_inode_num,
+                               disk_index) < 0) {
+               printf(
+                   "Error in alloc dentry: No space in parent directory for "
+                   "new "
+                   "entry.\n");
+               free(path_copy);
+               return -ENOSPC;  // No space in parent directory for new entry
+           }
+           // Update parent directory's metadata
+           // parent_inode->nlinks++;
+           parent_inode->mtim = time(NULL);
+           parent_inode->size += 1;
 
-    free(path_copy);
-    return 0;
+           free(path_copy);
+           return 0;
 }
 
 static int wfs_mkdir(const char *path, mode_t mode) {
@@ -966,6 +1001,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
                 return -ENOSPC;
             }
         }
+        sync_disks();
     } else if (raid == 0) {
     } else if (raid == 2) {
     }
@@ -975,10 +1011,10 @@ static int wfs_mkdir(const char *path, mode_t mode) {
 
 static int wfs_getattr(const char *path, struct stat *stbuf) {
     // Implementation of getattr function to retrieve file attributes
-    // Fill stbuf structure with the attributes of the file/directory indicated
-    // by path parse pa
+    // Fill stbuf structure with the attributes of the file/directory
+    // indicated by path parse pa
     printf("getattr: %s\n", path);
-    int inode_num = traverse_path(path);
+    int inode_num = traverse_path(path, 0);
     if (inode_num < 0) {
         return -ENOENT;  // Return -ENOENT if the file does not exist
     }
@@ -1005,7 +1041,7 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset,
     printf("read: %s\n", path);
     printf("size: %zu, offset: %ld\n", size, offset);
     // Find the inode number of the file specified by the path
-    int file_inode_num = traverse_path(path);
+    int file_inode_num = traverse_path(path, 0);
     if (file_inode_num < 0) {
         printf("Error in read: File not found: %s\n", path);
         return -ENOENT;  // File not found
@@ -1063,10 +1099,12 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset,
     if (size > 0 && offset >= direct_bytes) {
         if (file_inode->blocks[IND_BLOCK] == 0) {
             printf(
-                "read: Attempted to read from an unallocated indirect block. "
+                "read: Attempted to read from an unallocated indirect "
+                "block. "
                 "Total read: %zu\n",
                 total_read);
-            return total_read;  // Stop if the indirect block is not allocated
+            return total_read;  // Stop if the indirect block is not
+                                // allocated
         }
         off_t *indirect_blocks =
             (off_t *)((char *)maps[0] + sb_array[0]->d_blocks_ptr +
@@ -1108,7 +1146,8 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset,
 }
 /*
  * Write data to a file
- * Return the number of bytes written if successful, otherwise return error code
+ * Return the number of bytes written if successful, otherwise return error
+ * code
  */
 static int wfs_write(const char *path, const char *buf, size_t size,
                      off_t offset, struct fuse_file_info *fi) {
@@ -1116,7 +1155,7 @@ static int wfs_write(const char *path, const char *buf, size_t size,
     printf("write: %s\n", path);
     printf("size: %zu\n", size);
     // finds the file inode
-    int file_inode_num = traverse_path(path);
+    int file_inode_num = traverse_path(path, 0);
     if (file_inode_num < 0) {
         printf("Error in write: File not found: %s\n", path);
         return -ENOENT;
@@ -1140,7 +1179,7 @@ static int wfs_write(const char *path, const char *buf, size_t size,
         for (int i = starting_block; i < starting_block + num_blocks; i++) {
             if (file_inode->blocks[i] == 0) {
                 // allocate new data block
-                off_t datablock = allocate_data_block();
+                off_t datablock = allocate_data_block(0);
                 if (datablock < 0) {
                     return -ENOSPC;  // No space for new data block
                 }
@@ -1195,7 +1234,7 @@ static int wfs_write(const char *path, const char *buf, size_t size,
             for (int i = starting_block; i < starting_block + num_blocks; i++) {
                 if (file_inode->blocks[i] == 0) {
                     // allocate new data block
-                    off_t datablock = allocate_data_block();
+                    off_t datablock = allocate_data_block(0);
                     if (datablock < 0) {
                         return -ENOSPC;  // No space for new data block
                     }
@@ -1213,7 +1252,7 @@ static int wfs_write(const char *path, const char *buf, size_t size,
             // write into indirect block
             if (file_inode->blocks[IND_BLOCK] == 0) {
                 // allocate new data block
-                off_t datablock = allocate_data_block();
+                off_t datablock = allocate_data_block(0);
                 if (datablock < 0) {
                     return -ENOSPC;  // No space for new data block
                 }
@@ -1234,7 +1273,7 @@ static int wfs_write(const char *path, const char *buf, size_t size,
             for (int i = 0; i < num_indirect_blocks; i++) {  // 9 TIMES
                 if (indirect_blocks[i] == 0) {
                     // allocate new data block
-                    off_t datablock = allocate_data_block();
+                    off_t datablock = allocate_data_block(0);
                     if (datablock < 0) {
                         return -ENOSPC;  // No space for new data block
                     }
@@ -1275,7 +1314,7 @@ static int wfs_write(const char *path, const char *buf, size_t size,
             // write starting only from indirect block
             if (file_inode->blocks[IND_BLOCK] == 0) {
                 // allocate new data block
-                off_t datablock = allocate_data_block();
+                off_t datablock = allocate_data_block(0);
                 if (datablock < 0) {
                     return -ENOSPC;  // No space for new data block
                 }
@@ -1300,7 +1339,7 @@ static int wfs_write(const char *path, const char *buf, size_t size,
                  i < starting_block + num_indirect_blocks; i++) {
                 if (indirect_blocks[i] == 0) {
                     // allocate new data block
-                    off_t datablock = allocate_data_block();
+                    off_t datablock = allocate_data_block(0);
                     if (datablock < 0) {
                         return -ENOSPC;  // No space for new data block
                     }
