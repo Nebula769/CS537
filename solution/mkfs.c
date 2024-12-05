@@ -215,7 +215,7 @@ int main(int argc, char *argv[]) {
     root_inode.uid = getuid();
     root_inode.gid = getgid();
     root_inode.mode = S_IFDIR | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
-    root_inode.nlinks = 0;
+    root_inode.nlinks = 2;
     root_inode.size = 0;
 
     // bitmap rounding divide block size by something make a function for that

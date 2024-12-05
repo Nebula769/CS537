@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "stdio.h": "c",
+        "unistd.h": "c",
+        "errno.h": "c",
+        "wfs.h": "c",
+        "limits.h": "c",
+        "time.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "enabled"
+}
