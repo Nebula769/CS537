@@ -268,9 +268,9 @@ int free_inode(int inode_num) {
     }
 
     // Mark the inode as free in the bitmap
-    printf("Before: 0x%x\n", i_bitmap[byte_index]);
+    // printf("Before: 0x%x\n", i_bitmap[byte_index]);
     i_bitmap[byte_index] &= ~(1 << bit_offset);
-    printf("After: 0x%x\n", i_bitmap[byte_index]);
+    // printf("After: 0x%x\n", i_bitmap[byte_index]);
 
     // Clear the inode structure
     struct wfs_inode *inode =
@@ -316,8 +316,11 @@ off_t allocate_data_block(int disk_index) {
                                   block_num * BLOCK_SIZE;
 
                 memset(block_ptr, 0, BLOCK_SIZE);
-                off_t offset =
-                    (off_t)((char *)block_ptr - (char *)maps[disk_index]);
+
+                off_t offset = block_num * BLOCK_SIZE;
+
+                printf("Data block %d allocated at offset %ld\n", block_num,
+                       offset);
 
                 return offset;
             }
@@ -370,7 +373,7 @@ int allocate_dentry(char *name, int parent_inode_num, int inode_num,
         (struct wfs_inode *)((char *)maps[disk_index] +
                              sb_array[0]->i_blocks_ptr +
                              parent_inode_num * sizeof(struct wfs_inode));
-    for (int i = 0; i < D_BLOCK; i++) {
+    for (int i = 0; i < IND_BLOCK; i++) {
         if (inode->blocks[i] == -1) {
             // allocate new data block and place dentry
             off_t datablock = allocate_data_block(disk_index);
@@ -618,7 +621,7 @@ int unlink_helper(const char *path, int disk_index) {
                 (struct wfs_dentry *)((char *)maps[0] +
                                       sb_array[0]->d_blocks_ptr +
                                       parent_inode->blocks[i]);
-                                      //int num_entries = 0;
+            // int num_entries = 0;
             for (int j = 0; j < BLOCK_SIZE / sizeof(struct wfs_dentry); j++) {
                 // if (entries[j].num != 0) {
                 //     num_entries++;
@@ -638,12 +641,14 @@ int unlink_helper(const char *path, int disk_index) {
             //     free_data_block(parent_inode->blocks[i], disk_index);
             //     parent_inode->blocks[i] = -1;
             // }
-            
-            
         }
     }
     // free direct blocks of the file
     for (int i = 0; i < IND_BLOCK; i++) {
+        off_t block_offset = file_inode->blocks[i];
+        printf("unlink: blocks[%d] = %ld for inode %d\n", i, block_offset,
+               file_inode_num);
+
         if (file_inode->blocks[i] != -1) {
             free_data_block(file_inode->blocks[i], disk_index);
             file_inode->blocks[i] = -1;
@@ -691,7 +696,7 @@ static int wfs_unlink(const char *path) {
     if (raid < 3) {
         int result = unlink_helper(path, disk);
         sync_disks();
-        print_i_bitmap(disk);
+        // print_i_bitmap(disk);
         print_d_bitmap(disk);
 
         return result;
@@ -1010,7 +1015,7 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
     if (raid < 3) {
         int i = mknod_helper(path, mode, disk);
         sync_disks();
-        print_i_bitmap(disk);
+        // print_i_bitmap(disk);
         print_d_bitmap(disk);
         return i;
     } else if (raid == 0) {
@@ -1135,7 +1140,7 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
     // Implementation of getattr function to retrieve file attributes
     // Fill stbuf structure with the attributes of the file/directory
     // indicated by path parse pa
-    printf("getattr: %s\n", path);
+    // printf("getattr: %s\n", path);
     int inode_num = traverse_path(path, 0);
     if (inode_num < 0) {
         return -ENOENT;  // Return -ENOENT if the file does not exist
@@ -1609,6 +1614,7 @@ int main(int argc, char *argv[]) {
     //  printf("dentry name: %s\n", dentry[0].name);
     //  printf("dentry num: %d\n", dentry[0].num);
     //  printf("inode nlink: %d\n", root_inode->nlinks);
+    print_d_bitmap(0);
 
     return fuse_main(fuse_argc, fuse_args, &ops, NULL);
 }

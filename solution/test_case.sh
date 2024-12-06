@@ -1,4 +1,6 @@
 #!/bin/bash
 cd mnt
-cat ../myfile > bigfile.txt
-cat bigfile.txt
+cat ../three_blocks.txt > foo.c
+rm -f foo.c
+cat ../three_blocks.txt > foo.c
+cd ..
