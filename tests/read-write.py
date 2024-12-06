@@ -19,7 +19,6 @@ os.chdir("mnt")
 fhs = [open(name, "wb") for name in filelist]
 
 for i in range(numwrites):
-    print(f"Writing segment {i + 1}")
     for fh in fhs:
         towrite = data[i * segment:(i + 1) * segment]
         fh.write(towrite)
