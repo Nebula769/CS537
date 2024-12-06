@@ -218,6 +218,10 @@ int main(int argc, char *argv[]) {
     root_inode.nlinks = 2;
     root_inode.size = 0;
 
+    for (int i = 0; i < D_BLOCK; i++) {
+      root_inode.blocks[i] = -1;
+    }
+
     // bitmap rounding divide block size by something make a function for that
     // for test case
 

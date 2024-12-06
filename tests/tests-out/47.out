@@ -1,3 +1,2 @@
 Correct
-Correct
-total allocated datablocks on all disks: found 12 expected 4
+[Errno 2] No such file or directory: 'file1'
