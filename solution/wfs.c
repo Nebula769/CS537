@@ -26,6 +26,15 @@ int compare_disks(const void *a, const void *b) {
     return sb_a->disk_id - sb_b->disk_id;
 }
 
+int compare_addresses(const void *a, const void *b) {
+    void *addr1 = *(void **)a;
+    void *addr2 = *(void **)b;
+
+    if (addr1 < addr2) return -1;
+    if (addr1 > addr2) return 1;
+    return 0;
+}
+
 // grabs next logical block by looping through all the bitmaps
 int next_logical_block() {
     for (int disk_index = 0; disk_index < num_disks; disk_index++) {
@@ -331,6 +340,8 @@ off_t allocate_data_block() {
         print_d_bitmap(0);
 
         int logical_block = next_logical_block();
+        printf("Next logical block: %d\n", logical_block);
+
         if (logical_block == -1) {
             return -1;
         }
@@ -361,14 +372,18 @@ off_t allocate_data_block() {
                           block_index * BLOCK_SIZE;
         memset(block_ptr, 0, BLOCK_SIZE);
         off_t offset = block_index * BLOCK_SIZE;
+        printf("offset: %ld\n", offset);
 
         printf("Data block %d allocated at offset %ld for disk %d\n",
                block_index, offset, disk_index);
 
         printf("Just leaving allocate_data_block()\n");
         print_d_bitmap(0);
+        printf("map[0]: %p\n", maps[0]);
+        printf("map[1]: %p\n", maps[1]);
+        
 
-        return offset;
+        return (off_t)((char *)maps[disk_index] - (char *)maps[0] + offset);
 
     } else if (raid == 1) {
         printf("Just entered allocate_data_block()\n");
@@ -443,7 +458,7 @@ int allocate_dentry(char *name, int parent_inode_num, int inode_num,
     // Allocate a new directory entry in the inode
     // Return the index of the new directory entry if successful, otherwise
     // return -1
-
+    printf("startingallocate_dentry: %s\n", name);
     if (strlen(name) + 1 > MAX_NAME) {
         printf("Error: Name '%s' exceeds maximum length (%d).\n", name,
                MAX_NAME);
@@ -459,6 +474,7 @@ int allocate_dentry(char *name, int parent_inode_num, int inode_num,
             // allocate new data block and place dentry
             off_t datablock = allocate_data_block(disk_index);
             if (datablock < 0) {
+                printf("allocdentry: dataoffset is negative.\n");
                 return -1;  // No space for new data block
             }
             inode->blocks[i] = datablock;
@@ -590,6 +606,8 @@ int init_disks(char *disk_files[], int disk_count) {
 
         close(fd);
 
+
+
         // set the superblock
         sb_array[i] = (struct wfs_sb *)maps[i];
 
@@ -601,22 +619,20 @@ int init_disks(char *disk_files[], int disk_count) {
         }
         num_disks++;
 
-        // printf("Set superblock for disk: %s\n", dir_name);
-        // printf("Superblock details for disk %s:\n", dir_name);
-        // printf("  Number of Inodes: %zu\n", sb_array[i]->num_inodes);
-        // printf("  Number of Data Blocks: %zu\n",
-        // sb_array[i]->num_data_blocks); printf("  Inode Bitmap Pointer:
-        // %ld\n", sb_array[i]->i_bitmap_ptr); printf("  Data Bitmap Pointer:
-        // %ld\n", sb_array[i]->d_bitmap_ptr); printf("  Inode Blocks Pointer:
-        // %ld\n", sb_array[i]->i_blocks_ptr); printf("  Data Blocks Pointer:
-        // %ld\n", sb_array[i]->d_blocks_ptr); printf("  RAID Mode: %d\n",
-        // sb_array[i]->raid_mode);
+       
     }
 
     int expected_disks = sb_array[0]->num_disks;
     if (validate_disks(sb_array, disk_files, disk_count, expected_disks) != 0) {
         printf("Disk validation failed. Aborting mount.\n");
         return -1;
+    }
+
+    qsort(maps, disk_count, sizeof(void *), compare_addresses);
+
+    // Print sorted addresses for verification
+    for (int i = 0; i < disk_count; i++) {
+        printf("maps[%d]: %p\n", i, maps[i]);
     }
 
     return 0;
@@ -1091,7 +1107,6 @@ static int mknod_helper(const char *path, mode_t mode, int disk_index) {
     free(path_copy);
     printf("Successfully created file: %s with inode %d\n", path,
            new_inode_num);
-    print_i_bitmap(0);
     return 0;
 }
 
@@ -1107,18 +1122,20 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
         return i;
     } else if (raid == 0) {
         int i = mknod_helper(path, mode, disk);
+        sync_meta_data();
         print_i_bitmap(0);
         print_d_bitmap(0);
-        printf("printing out inode of new directory \n");
-        struct wfs_inode *inode =
-            (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
-                                 i * sizeof(struct wfs_inode));
-        printf("inode->mode: %d\n", inode->mode);
-        printf("inode->uid: %d\n", inode->uid);
-        printf("inode->gid: %d\n", inode->gid);
-        printf("inode->size: %ld\n", inode->size);
-        printf("inode->nlinks: %d\n", inode->nlinks);
-        printf("inode->atim: %ld\n", inode->atim);
+        // printf("printing out inode of new directory \n");
+        // struct wfs_inode *inode =
+        //     (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr
+        //     +
+        //                          i * sizeof(struct wfs_inode));
+        // printf("inode->mode: %d\n", inode->mode);
+        // printf("inode->uid: %d\n", inode->uid);
+        // printf("inode->gid: %d\n", inode->gid);
+        // printf("inode->size: %ld\n", inode->size);
+        // printf("inode->nlinks: %d\n", inode->nlinks);
+        // printf("inode->atim: %ld\n", inode->atim);
 
         return i;
 
@@ -1244,16 +1261,17 @@ static int wfs_mkdir(const char *path, mode_t mode) {
         sync_meta_data();
         print_i_bitmap(0);
         print_d_bitmap(0);
-        printf("printing out inode of new directory \n");
-        struct wfs_inode *inode =
-            (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
-                                 i * sizeof(struct wfs_inode));
-        printf("inode->mode: %d\n", inode->mode);
-        printf("inode->uid: %d\n", inode->uid);
-        printf("inode->gid: %d\n", inode->gid);
-        printf("inode->size: %ld\n", inode->size);
-        printf("inode->nlinks: %d\n", inode->nlinks);
-        printf("inode->atim: %ld\n", inode->atim);
+        // printf("printing out inode of new directory \n");
+        // struct wfs_inode *inode =
+        //     (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr
+        //     +
+        //                          i * sizeof(struct wfs_inode));
+        // printf("inode->mode: %d\n", inode->mode);
+        // printf("inode->uid: %d\n", inode->uid);
+        // printf("inode->gid: %d\n", inode->gid);
+        // printf("inode->size: %ld\n", inode->size);
+        // printf("inode->nlinks: %d\n", inode->nlinks);
+        // printf("inode->atim: %ld\n", inode->atim);
 
         return i;
 

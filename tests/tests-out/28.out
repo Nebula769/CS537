@@ -1,1 +1,1 @@
-[Errno 2] No such file or directory: 'd1/d2'
+[Errno 28] No space left on device: 'd1/d2/d3'
