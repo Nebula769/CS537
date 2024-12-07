@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/home/hzheng/private/537/FUSE-File-System/tests/./read-write.py", line 27, in <module>
-    fh.close()
-OSError: [Errno 28] No space left on device

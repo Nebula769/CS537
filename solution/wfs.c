@@ -45,6 +45,7 @@ int next_logical_block() {
         for (int i = 0; i < num_bytes; i++) {
             for (int bit_index = 0; bit_index < 8; bit_index++) {
                 if (!(d_bitmap[i] & (1 << bit_index))) {
+                    d_bitmap[i] |= (1 << bit_index);
                     return i * 8 + bit_index;
                 }
             }
@@ -340,9 +341,10 @@ off_t allocate_data_block() {
         print_d_bitmap(0);
 
         int logical_block = next_logical_block();
-        printf("Next logical block: %d\n", logical_block);
+        printf("Allocating logical block: %d\n", logical_block);
 
         if (logical_block == -1) {
+            printf("Error: No logical blocks could be found!.\n");
             return -1;
         }
         int disk_index = logical_block % num_disks;
@@ -350,19 +352,17 @@ off_t allocate_data_block() {
         printf("logical block: %d, disk index: %d, block index: %d\n",
                logical_block, disk_index, block_index);
 
-        // go through bitmap and set logical block as used
-        unsigned char *d_bitmap = (unsigned char *)((char *)maps[disk_index] +
-                                                    sb_array[0]->d_bitmap_ptr);
-        int byte_index = block_index / 8;
-        int bit_offset = block_index % 8;
-        if (d_bitmap[byte_index] & (1 << bit_offset)) {
-            printf(
-                "next_logical_block returns block number %d that is already in "
-                "used.\n",
-                block_index);
-            return -1;
-        }
-        d_bitmap[byte_index] |= (1 << bit_offset);
+        // // go through bitmap and set logical block as used
+        // unsigned char *d_bitmap = (unsigned char *)((char *)maps[disk_index] +
+        //                                             sb_array[0]->d_bitmap_ptr);
+        // int byte_index = block_index / 8;
+        // int bit_offset = block_index % 8;
+        // if (d_bitmap[byte_index] & (1 << bit_offset)) {
+        //     printf(
+        //         "next_logical_block returns block number %d that is already
+        //         in " "used.\n", block_index);
+        //     return -1;
+        // }
 
         printf("Allocating data block %d on disk %d\n", block_index,
                disk_index);
@@ -381,7 +381,6 @@ off_t allocate_data_block() {
         print_d_bitmap(0);
         printf("map[0]: %p\n", maps[0]);
         printf("map[1]: %p\n", maps[1]);
-        
 
         return (off_t)((char *)maps[disk_index] - (char *)maps[0] + offset);
 
@@ -606,8 +605,6 @@ int init_disks(char *disk_files[], int disk_count) {
 
         close(fd);
 
-
-
         // set the superblock
         sb_array[i] = (struct wfs_sb *)maps[i];
 
@@ -618,8 +615,6 @@ int init_disks(char *disk_files[], int disk_count) {
             return -1;
         }
         num_disks++;
-
-       
     }
 
     int expected_disks = sb_array[0]->num_disks;
@@ -1678,11 +1673,14 @@ static int write_helper(const char *path, const char *buf, size_t size,
 static int wfs_write(const char *path, const char *buf, size_t size,
                      off_t offset, struct fuse_file_info *fi) {
     (void)fi;
-    if (raid < 3) {
+    if (raid == 1) {
         int i = write_helper(path, buf, size, offset, fi);
         sync_disks();
         return i;
     } else if (raid == 0) {
+        int i = write_helper(path, buf, size, offset, fi);
+        sync_meta_data();
+        return i;
     } else if (raid == 2) {
     }
 

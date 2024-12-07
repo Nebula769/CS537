@@ -1,3 +1,0 @@
-Traceback (most recent call last):
-  File "<string>", line 10, in <module>
-OSError: [Errno 28] No space left on device
