@@ -26,6 +26,26 @@ int compare_disks(const void *a, const void *b) {
     return sb_a->disk_id - sb_b->disk_id;
 }
 
+// grabs next logical block by looping through all the bitmaps
+int next_logical_block() {
+    for (int disk_index = 0; disk_index < num_disks; disk_index++) {
+        unsigned char *d_bitmap = (unsigned char *)((char *)maps[disk_index] +
+                                                    sb_array[0]->d_bitmap_ptr);
+        int num_bytes = sb_array[0]->num_data_blocks / 8;
+
+        for (int i = 0; i < num_bytes; i++) {
+            for (int bit_index = 0; bit_index < 8; bit_index++) {
+                if (!(d_bitmap[i] & (1 << bit_index))) {
+                    return i * 8 + bit_index;
+                }
+            }
+        }
+    }
+
+    // no free block
+    return -1;
+}
+
 int print_i_bitmap(int disk_index) {
     unsigned char *i_bitmap =
         (unsigned char *)((char *)maps[disk_index] + sb_array[0]->i_bitmap_ptr);
@@ -67,6 +87,23 @@ int sync_disks() {
 
     for (int i = 1; i < num_disks; i++) {
         memcpy(maps[i], maps[0], disk_size);
+    }
+
+    return 0;
+}
+
+int sync_meta_data() {
+    // // copy i_bitmap and inode blocks section to every disk
+
+    for (int i = 1; i < num_disks; i++) {
+        // copy i_bitmap
+        memcpy((char *)maps[i] + sb_array[i]->i_bitmap_ptr,
+               (char *)maps[0] + sb_array[0]->i_bitmap_ptr,
+               sb_array[0]->num_inodes / 8);
+
+        memcpy((char *)maps[i] + sb_array[i]->i_blocks_ptr,
+               (char *)maps[0] + sb_array[0]->i_blocks_ptr,
+               sb_array[0]->num_inodes * BLOCK_SIZE);
     }
 
     return 0;
@@ -199,9 +236,9 @@ int traverse_path(const char *path, int disk_index) {
  * Return the inode number if successful, otherwise return -1
  *
  */
-int allocate_inode(mode_t mode, int disk_index) {
+int allocate_inode(mode_t mode) {
     unsigned char *i_bitmap =
-        (unsigned char *)((char *)maps[disk_index] + sb_array[0]->i_bitmap_ptr);
+        (unsigned char *)((char *)maps[0] + sb_array[0]->i_bitmap_ptr);
     int num_bytes = sb_array[0]->num_inodes / 8;
 
     for (int i = 0; i < num_bytes; i++) {
@@ -212,7 +249,7 @@ int allocate_inode(mode_t mode, int disk_index) {
                 // init new inode
                 int inode_num = i * 8 + bit_index;
                 struct wfs_inode *new_inode =
-                    (struct wfs_inode *)((char *)maps[disk_index] +
+                    (struct wfs_inode *)((char *)maps[0] +
                                          sb_array[0]->i_blocks_ptr +
                                          inode_num * sizeof(struct wfs_inode));
 
@@ -288,41 +325,85 @@ int free_inode(int inode_num) {
  * Return the off_t of data block if successful, otherwise return -1
  *
  */
-off_t allocate_data_block(int disk_index) {
-    unsigned char *d_bitmap =
-        (unsigned char *)((char *)maps[disk_index] + sb_array[0]->d_bitmap_ptr);
-    int num_bytes = sb_array[0]->num_data_blocks / 8;
+off_t allocate_data_block() {
+    if (raid == 0) {
+        printf("Just entered allocate_data_block()\n");
+        print_d_bitmap(0);
 
-    for (int i = 0; i < num_bytes; i++) {
-        for (int bit_index = 0; bit_index < 8; bit_index++) {
-            if (!(d_bitmap[i] & (1 << bit_index))) {
-                // Mark the data block as used
-                d_bitmap[i] |= (1 << bit_index);
-                int block_num = i * 8 + bit_index;
+        int logical_block = next_logical_block();
+        if (logical_block == -1) {
+            return -1;
+        }
+        int disk_index = logical_block % num_disks;
+        int block_index = logical_block / num_disks;
+        printf("logical block: %d, disk index: %d, block index: %d\n",
+               logical_block, disk_index, block_index);
 
-                // int target_disk = block_num % num_disks;
+        // go through bitmap and set logical block as used
+        unsigned char *d_bitmap = (unsigned char *)((char *)maps[disk_index] +
+                                                    sb_array[0]->d_bitmap_ptr);
+        int byte_index = block_index / 8;
+        int bit_offset = block_index % 8;
+        if (d_bitmap[byte_index] & (1 << bit_offset)) {
+            printf(
+                "next_logical_block returns block number %d that is already in "
+                "used.\n",
+                block_index);
+            return -1;
+        }
+        d_bitmap[byte_index] |= (1 << bit_offset);
 
-                // hard code to disk 0
-                // target_disk = 0;
+        printf("Allocating data block %d on disk %d\n", block_index,
+               disk_index);
 
-                // int block_offset = block_num / num_disks;
-                printf("Allocating data block %d on disk %d\n", block_num,
-                       disk_index);
-                // target_disk);
+        // Initialize the data block
+        char *block_ptr = (char *)maps[disk_index] + sb_array[0]->d_blocks_ptr +
+                          block_index * BLOCK_SIZE;
+        memset(block_ptr, 0, BLOCK_SIZE);
+        off_t offset = block_index * BLOCK_SIZE;
 
-                // Initialize the data block
-                char *block_ptr = (char *)maps[disk_index] +
-                                  sb_array[0]->d_blocks_ptr +
-                                  block_num * BLOCK_SIZE;
+        printf("Data block %d allocated at offset %ld for disk %d\n",
+               block_index, offset, disk_index);
 
-                memset(block_ptr, 0, BLOCK_SIZE);
+        printf("Just leaving allocate_data_block()\n");
+        print_d_bitmap(0);
 
-                off_t offset = block_num * BLOCK_SIZE;
+        return offset;
 
-                printf("Data block %d allocated at offset %ld\n", block_num,
-                       offset);
+    } else if (raid == 1) {
+        printf("Just entered allocate_data_block()\n");
+        print_d_bitmap(0);
+        unsigned char *d_bitmap =
+            (unsigned char *)((char *)maps[0] + sb_array[0]->d_bitmap_ptr);
 
-                return offset;
+        int num_bytes = sb_array[0]->num_data_blocks / 8;
+
+        for (int i = 0; i < num_bytes; i++) {
+            for (int bit_index = 0; bit_index < 8; bit_index++) {
+                if (!(d_bitmap[i] & (1 << bit_index))) {
+                    // Mark the data block as used
+                    d_bitmap[i] |= (1 << bit_index);
+                    int block_num = i * 8 + bit_index;
+
+                    printf("Allocating data block %d on disk %d\n", block_num,
+                           0);
+
+                    // Initialize the data block
+                    char *block_ptr = (char *)maps[0] +
+                                      sb_array[0]->d_blocks_ptr +
+                                      block_num * BLOCK_SIZE;
+
+                    memset(block_ptr, 0, BLOCK_SIZE);
+
+                    off_t offset = block_num * BLOCK_SIZE;
+
+                    printf("Data block %d allocated at offset %ld\n", block_num,
+                           offset);
+                    printf("Just leaving allocate_data_block()\n");
+                    print_d_bitmap(0);
+
+                    return offset;
+                }
             }
         }
     }
@@ -976,9 +1057,8 @@ static int mknod_helper(const char *path, mode_t mode, int disk_index) {
         return -EEXIST;  // Directory already exists
     }
 
-    int disk_num = 0;
     // allocate a new inode
-    int new_inode_num = allocate_inode(d_mode, disk_num);
+    int new_inode_num = allocate_inode(d_mode);
     // printf("new_inode_num: %d\n", new_inode_num);
     if (new_inode_num < 0) {
         printf("Failed to allocate new inode.\n");
@@ -990,6 +1070,10 @@ static int mknod_helper(const char *path, mode_t mode, int disk_index) {
         (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
                              new_inode_num * sizeof(struct wfs_inode));
     new_inode->nlinks = 1;  // change: set nlinks to 1
+
+    if (raid == 0) {
+        sync_meta_data(disk_index);
+    }
 
     if (allocate_dentry(dir_name, parent_inode_num, new_inode_num, disk_index) <
         0) {
@@ -1005,6 +1089,9 @@ static int mknod_helper(const char *path, mode_t mode, int disk_index) {
     // change: dont inc size becase of file
 
     free(path_copy);
+    printf("Successfully created file: %s with inode %d\n", path,
+           new_inode_num);
+    print_i_bitmap(0);
     return 0;
 }
 
@@ -1012,13 +1099,29 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t dev) {
     (void)dev;
     printf("mknod: %s\n", path);
     int disk = 0;
-    if (raid < 3) {
+    if (raid == 1) {
         int i = mknod_helper(path, mode, disk);
         sync_disks();
         // print_i_bitmap(disk);
         print_d_bitmap(disk);
         return i;
     } else if (raid == 0) {
+        int i = mknod_helper(path, mode, disk);
+        print_i_bitmap(0);
+        print_d_bitmap(0);
+        printf("printing out inode of new directory \n");
+        struct wfs_inode *inode =
+            (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                                 i * sizeof(struct wfs_inode));
+        printf("inode->mode: %d\n", inode->mode);
+        printf("inode->uid: %d\n", inode->uid);
+        printf("inode->gid: %d\n", inode->gid);
+        printf("inode->size: %ld\n", inode->size);
+        printf("inode->nlinks: %d\n", inode->nlinks);
+        printf("inode->atim: %ld\n", inode->atim);
+
+        return i;
+
     } else if (raid == 2) {
     }
 
@@ -1091,7 +1194,7 @@ int mkdir_helper(const char *path, mode_t mode, int disk_index) {
     }
 
     // allocate a new inode
-    int new_inode_num = allocate_inode(d_mode, disk_index);
+    int new_inode_num = allocate_inode(d_mode);
     // printf("new_inode_num: %d\n", new_inode_num);
     if (new_inode_num < 0) {
         printf("Failed to allocate new inode.\n");
@@ -1103,6 +1206,10 @@ int mkdir_helper(const char *path, mode_t mode, int disk_index) {
         (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
                              new_inode_num * sizeof(struct wfs_inode));
     new_inode->nlinks = 1;
+
+    if (raid == 0) {
+        sync_meta_data(disk_index);
+    }
 
     if (allocate_dentry(dir_name, parent_inode_num, new_inode_num, disk_index) <
         0) {
@@ -1123,13 +1230,33 @@ int mkdir_helper(const char *path, mode_t mode, int disk_index) {
 }
 
 static int wfs_mkdir(const char *path, mode_t mode) {
+    printf("raid: %d\n", raid);
     printf("mkdir: %s\n", path);
     int disk = 0;
-    if (raid < 3) {
+    if (raid == 1) {
+        print_i_bitmap(0);
         int i = mkdir_helper(path, mode, disk);
         sync_disks();
+        print_i_bitmap(0);
         return i;
     } else if (raid == 0) {
+        int i = mkdir_helper(path, mode, disk);
+        sync_meta_data();
+        print_i_bitmap(0);
+        print_d_bitmap(0);
+        printf("printing out inode of new directory \n");
+        struct wfs_inode *inode =
+            (struct wfs_inode *)((char *)maps[0] + sb_array[0]->i_blocks_ptr +
+                                 i * sizeof(struct wfs_inode));
+        printf("inode->mode: %d\n", inode->mode);
+        printf("inode->uid: %d\n", inode->uid);
+        printf("inode->gid: %d\n", inode->gid);
+        printf("inode->size: %ld\n", inode->size);
+        printf("inode->nlinks: %d\n", inode->nlinks);
+        printf("inode->atim: %ld\n", inode->atim);
+
+        return i;
+
     } else if (raid == 2) {
     }
 
@@ -1318,7 +1445,7 @@ static int write_helper(const char *path, const char *buf, size_t size,
         for (int i = starting_block; i < starting_block + num_blocks; i++) {
             if (file_inode->blocks[i] == -1) {
                 // allocate new data block
-                off_t datablock = allocate_data_block(0);
+                off_t datablock = allocate_data_block();
                 if (datablock < 0) {
                     return -ENOSPC;  // No space for new data block
                 }
@@ -1374,7 +1501,7 @@ static int write_helper(const char *path, const char *buf, size_t size,
             for (int i = starting_block; i < starting_block + num_blocks; i++) {
                 if (file_inode->blocks[i] == -1) {
                     // allocate new data block
-                    off_t datablock = allocate_data_block(0);
+                    off_t datablock = allocate_data_block();
                     if (datablock < 0) {
                         return -ENOSPC;  // No space for new data block
                     }
@@ -1392,7 +1519,7 @@ static int write_helper(const char *path, const char *buf, size_t size,
             // write into indirect block
             if (file_inode->blocks[IND_BLOCK] == -1) {
                 // allocate new data block
-                off_t datablock = allocate_data_block(0);
+                off_t datablock = allocate_data_block();
                 if (datablock < 0) {
                     return -ENOSPC;  // No space for new data block
                 }
@@ -1413,7 +1540,7 @@ static int write_helper(const char *path, const char *buf, size_t size,
             for (int i = 0; i < num_indirect_blocks; i++) {  // 9 TIMES
                 if (indirect_blocks[i] == 0) {
                     // allocate new data block
-                    off_t datablock = allocate_data_block(0);
+                    off_t datablock = allocate_data_block();
                     if (datablock < 0) {
                         return -ENOSPC;  // No space for new data block
                     }
@@ -1454,7 +1581,7 @@ static int write_helper(const char *path, const char *buf, size_t size,
             // write starting only from indirect block
             if (file_inode->blocks[IND_BLOCK] == -1) {
                 // allocate new data block
-                off_t datablock = allocate_data_block(0);
+                off_t datablock = allocate_data_block();
                 if (datablock < 0) {
                     return -ENOSPC;  // No space for new data block
                 }
@@ -1479,7 +1606,7 @@ static int write_helper(const char *path, const char *buf, size_t size,
                  i < starting_block + num_indirect_blocks; i++) {
                 if (indirect_blocks[i] == 0) {
                     // allocate new data block
-                    off_t datablock = allocate_data_block(0);
+                    off_t datablock = allocate_data_block();
                     if (datablock < 0) {
                         return -ENOSPC;  // No space for new data block
                     }
@@ -1601,20 +1728,14 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < num_disks; i++) {
         printf("  %s\n", disks[i]);
     }
-    printf("Starting Fuse... \n");
 
     // Pass FUSE options to fuse_main
     fuse_args[fuse_argc++] = mount_point;  // Add mount point to FUSE args
     fuse_args[fuse_argc] = NULL;           // Null-terminate for FUSE
     init_disks(disks, num_disks);
-    // struct wfs_inode *root_inode = (struct wfs_inode *)((char *)maps[0] +
-    // sb_array[0]->i_blocks_ptr); struct wfs_dentry *dentry = (struct
-    // wfs_dentry *)((char *)maps[0] + sb_array[0]->d_blocks_ptr +
-    // root_inode->blocks[0]);
-    //  printf("dentry name: %s\n", dentry[0].name);
-    //  printf("dentry num: %d\n", dentry[0].num);
-    //  printf("inode nlink: %d\n", root_inode->nlinks);
+    printf("Starting Fuse in raid %d... \n", raid);
     print_d_bitmap(0);
+    print_i_bitmap(0);
 
     return fuse_main(fuse_argc, fuse_args, &ops, NULL);
 }

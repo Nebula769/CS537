@@ -1,6 +1,7 @@
 #!/bin/bash
 cd mnt
-cat ../three_blocks.txt > foo.c
-rm -f foo.c
-cat ../three_blocks.txt > foo.c
+for i in {1..10}; do
+    touch "file_$i.txt"
+done
 cd ..
+clear

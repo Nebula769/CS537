@@ -1,1 +1,8 @@
+Traceback (most recent call last):
+  File "/home/hzheng/private/537/FUSE-File-System/tests/./read-write.py", line 19, in <module>
+    fhs = [open(name, "wb") for name in filelist]
+  File "/home/hzheng/private/537/FUSE-File-System/tests/./read-write.py", line 19, in <listcomp>
+    fhs = [open(name, "wb") for name in filelist]
+PermissionError: [Errno 1] Operation not permitted: 'file1'
+cat: mnt/file1: No such file or directory
 diff: mnt/file1: No such file or directory
