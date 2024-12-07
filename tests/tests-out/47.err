@@ -1,3 +1,1 @@
-Traceback (most recent call last):
-  File "<string>", line 9, in <module>
-ConnectionAbortedError: [Errno 103] Software caused connection abort: 'file1'
+rm: cannot remove 'mnt/file1': Software caused connection abort

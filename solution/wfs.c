@@ -353,7 +353,8 @@ off_t allocate_data_block() {
                logical_block, disk_index, block_index);
 
         // // go through bitmap and set logical block as used
-        // unsigned char *d_bitmap = (unsigned char *)((char *)maps[disk_index] +
+        // unsigned char *d_bitmap = (unsigned char *)((char *)maps[disk_index]
+        // +
         //                                             sb_array[0]->d_bitmap_ptr);
         // int byte_index = block_index / 8;
         // int bit_offset = block_index % 8;
@@ -425,9 +426,10 @@ off_t allocate_data_block() {
     return -1;  // No free data block available
 }
 
-int free_data_block(off_t block_offset, int disk_index) {
+int free_data_block(off_t block_offset) {
     // Calculate block number from the offset
-    int block_num = block_offset / BLOCK_SIZE;
+    int block_num = (block_offset - (off_t)((char *)maps[0])) / BLOCK_SIZE;
+    int disk_index = block_num % num_disks;
 
     unsigned char *d_bitmap =
         (unsigned char *)((char *)maps[disk_index] + sb_array[0]->d_bitmap_ptr);
@@ -742,7 +744,7 @@ int unlink_helper(const char *path, int disk_index) {
                file_inode_num);
 
         if (file_inode->blocks[i] != -1) {
-            free_data_block(file_inode->blocks[i], disk_index);
+            free_data_block(file_inode->blocks[i]);
             file_inode->blocks[i] = -1;
         }
     }
@@ -755,12 +757,12 @@ int unlink_helper(const char *path, int disk_index) {
 
         for (int i = 0; i < N_POINTERS; i++) {
             if (indirect_blocks[i] != 0) {
-                free_data_block(indirect_blocks[i], disk_index);
+                free_data_block(indirect_blocks[i]);
                 indirect_blocks[i] = 0;
             }
         }
         // Free the indirect block itself
-        free_data_block(file_inode->blocks[IND_BLOCK], disk_index);
+        free_data_block(file_inode->blocks[IND_BLOCK]);
         file_inode->blocks[IND_BLOCK] = -1;
     }
 
@@ -785,7 +787,7 @@ int unlink_helper(const char *path, int disk_index) {
 static int wfs_unlink(const char *path) {
     printf("wfs_unlink: %s\n", path);
     int disk = 0;
-    if (raid < 3) {
+    if (raid == 1) {
         int result = unlink_helper(path, disk);
         sync_disks();
         // print_i_bitmap(disk);
@@ -793,6 +795,12 @@ static int wfs_unlink(const char *path) {
 
         return result;
     } else if (raid == 0) {
+        int result = unlink_helper(path, disk);
+        sync_meta_data();
+        // print_i_bitmap(disk);
+        print_d_bitmap(disk);
+        return result;
+
         // Implement RAID 0 logic if applicable
     } else if (raid == 2) {
         // Implement RAID 2 logic if applicable
