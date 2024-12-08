@@ -1872,9 +1872,10 @@ static int read_helper(const char *path, char *buf, size_t size, off_t offset,
 
 static int read_helper_r0(const char *path, char *buf, size_t size,
                           off_t offset, struct fuse_file_info *fi) {
-    (void)fi;
+    (void)fi;  // Unused parameter
     printf("read: %s\n", path);
     printf("size: %zu, offset: %ld\n", size, offset);
+
     // Find the inode number of the file specified by the path
     int file_inode_num = traverse_path(path);
     if (file_inode_num < 0) {
@@ -1885,111 +1886,63 @@ static int read_helper_r0(const char *path, char *buf, size_t size,
     struct wfs_inode *file_inode =
         (struct wfs_inode *)((char *)maps[0] + sb->i_blocks_ptr +
                              file_inode_num * sizeof(struct wfs_inode));
-    int direct_bytes = (D_BLOCK + 1) * BLOCK_SIZE;  // 3584
 
     // Ensure the read does not go beyond the file's size
-    // if (offset >= file_inode->size) {
-    //     printf("Error in read: Offset is beyond file size.\n");
-    //     return 0;  // EOF
-    // }
+    if (offset >= file_inode->size) {
+        printf("Error in read: Offset is beyond file size.\n");
+        return 0;  // EOF
+    }
 
     if (offset + size > file_inode->size) {
         size = file_inode->size -
                offset;  // Adjust size to read up to the file's end
     }
 
-    // size_t original_size = size;
     size_t total_read = 0;
+    size_t remaining_size = size;
 
-    // Case 1: Read from direct blocks
-    if (offset < direct_bytes) {
-        // int num_blocks = (size + (BLOCK_SIZE - 1)) / BLOCK_SIZE;
-        int starting_block = offset / BLOCK_SIZE;
-        int byte_offset = offset % BLOCK_SIZE;
+    // Calculate the starting block and offset within the block
+    int starting_block = offset / BLOCK_SIZE;
+    int byte_offset = offset % BLOCK_SIZE;
 
-        for (int i = starting_block; i < IND_BLOCK && size > 0; i++) {
-            if (file_inode->blocks[i] == -1) {
-                printf(
-                    "read: Attempted to read from an unallocated block "
-                    "%d.\n",
-                    i);
-                break;  // Stop if the block is not allocated
-            }
-            int logical_block = file_inode->blocks[i];
-            int disk_index = logical_block % num_disks;
-            int block_index = (logical_block / num_disks);
-            int block_offset = block_index * BLOCK_SIZE;
-
-            char *block_ptr =
-                (char *)maps[disk_index] + sb->d_blocks_ptr + block_offset;
-            size_t read_size = BLOCK_SIZE - byte_offset;
-            if (read_size > size) {
-                read_size = size;
-            }
-
-            memcpy(buf, block_ptr + byte_offset, read_size);
-            buf += read_size;
-            size -= read_size;
-            total_read += read_size;
-            byte_offset = 0;  // Reset offset for the next block
+    while (remaining_size > 0) {
+        if (starting_block >= IND_BLOCK) {
+            printf("Error: Block index exceeds direct blocks.\n");
+            break;
         }
 
-        offset = direct_bytes;  // adjust ofset to transiton to indirect blocks
-    }
-
-    // Case 2: Read from indirect blocks if needed
-    if (size > 0 && offset >= direct_bytes) {
-        if (file_inode->blocks[IND_BLOCK] == -1) {
-            printf(
-                "read: Attempted to read from an unallocated indirect "
-                "block. IND_BLOCK"
-                "Total read: %zu\n",
-                total_read);
-            return total_read;  // Stop if the indirect block is not
-                                // allocated
+        if (file_inode->blocks[starting_block] == -1) {
+            printf("read: Attempted to read from an unallocated block %d.\n",
+                   starting_block);
+            break;
         }
-        int logical_block = file_inode->blocks[IND_BLOCK];
-        int disk_index = logical_block % num_disks;
-        int block_index = (logical_block / num_disks);
+
+        // Calculate the logical block, disk index, and block offset
+        int logical_block = file_inode->blocks[starting_block];
+        int disk_index = logical_block % num_disks;  // Determine which disk
+        int block_index =
+            logical_block / num_disks;  // Determine the block on the disk
         int block_offset = block_index * BLOCK_SIZE;
 
-        off_t *indirect_blocks = (off_t *)((char *)maps[disk_index] +
-                                           sb->d_blocks_ptr + block_offset);
-        int starting_indirect_block = (offset - direct_bytes) / BLOCK_SIZE;
-        int byte_offset = (offset - direct_bytes) % BLOCK_SIZE;
+        // Get the pointer to the block on the correct disk
+        char *block_ptr =
+            (char *)maps[disk_index] + sb->d_blocks_ptr + block_offset;
 
-        printf("read: Starting indirect block: %d\n", starting_indirect_block);
-        printf("read: Byte offset: %d\n", byte_offset);
-
-        for (int i = starting_indirect_block; i < N_POINTERS && size > 0; i++) {
-            if (indirect_blocks[i] == 0) {
-                printf(
-                    "read: Attempted to read from an unallocated indirect "
-                    "block %d %p.\n",
-                    i, (void *)indirect_blocks);
-                break;  // Stop if the indirect block is not allocated
-            }
-            int logical_block = indirect_blocks[i];
-            int disk_index = logical_block % num_disks;
-            int block_index = (logical_block / num_disks);
-            int block_offset = block_index * BLOCK_SIZE;
-
-            char *block_ptr =
-                (char *)maps[disk_index] + sb->d_blocks_ptr + block_offset;
-            size_t read_size = BLOCK_SIZE - byte_offset;
-            printf("read: Read size: %zu\n", read_size);
-            if (read_size > size) {
-                read_size = size;
-            }
-            printf("read: Read size after adjustment: %zu\n", read_size);
-
-            memcpy(buf, block_ptr + byte_offset, read_size);
-            buf += read_size;
-            size -= read_size;
-            total_read += read_size;
-            printf("read: Total read so far: %zu\n", total_read);
-            byte_offset = 0;  // Reset offset for the next block
+        // Calculate the number of bytes to read from the current block
+        size_t read_size = BLOCK_SIZE - byte_offset;
+        if (read_size > remaining_size) {
+            read_size = remaining_size;
         }
+
+        // Copy data from the block into the buffer
+        memcpy(buf, block_ptr + byte_offset, read_size);
+
+        // Update variables for the next iteration
+        buf += read_size;
+        total_read += read_size;
+        remaining_size -= read_size;
+        starting_block++;
+        byte_offset = 0;  // Reset offset for the next block
     }
 
     printf("read: Successfully read %zu bytes from %s\n", total_read, path);
