@@ -1,2 +1,3 @@
 Correct
-Correct
+file1 readback does not match data written
+Binary files mnt/file1 and file1.test differ

@@ -1,5 +1,5 @@
 #!/bin/bash
 cd mnt
-cat ../three_blocks.txt > file1.txt
+cat ../large_file.txt > file1.txt
+cat file1.txt
 cd ..
-clear
